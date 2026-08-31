@@ -1,21 +1,70 @@
 # Reproduction & Demo Guide
 
-Follow these steps to set up, run, test, and demonstrate the Adaptive Learning Platform.
+Follow these steps to set up, run, test, and demonstrate the Adaptive Learning Platform from a clean environment.
+
+---
+
+## Environment & Versions
+
+- Python: 3.14.4
+- Node.js: 24.15.0
+- npm: 12.0.2
+- Backend: FastAPI + Uvicorn
+- Frontend: React + Vite
+- LLM provider/model: Groq (openai/gpt-oss-120b) + Gemini (gemini-3.6-flash)
 
 ---
 
 ## 1. Setup & Environment
-Ensure you have the following environment variables defined in your `backend/.env` file:
-```env
-# API Key (Supports Groq keys starting with gsk_ or OpenAI/xAI keys)
-GROQ_API_KEY=gsk_...
-# Model routing
-LLM_MODEL=openai/gpt-oss-120b
+
+### Backend Environment Creation
+Create the Python virtual environment and install dependencies:
+```bash
+cd backend
+python -m venv venv
+```
+
+**Windows (PowerShell):**
+```powershell
+.\venv\Scripts\activate
+pip install -r requirements.txt
+```
+
+**macOS / Linux:**
+```bash
+source venv/bin/activate
+pip install -r requirements.txt
+```
+
+### Frontend Environment Creation
+Install node dependencies cleanly:
+```bash
+cd frontend
+npm ci
 ```
 
 ---
 
-## 2. Booting the Application
+## 2. Required Data & Configuration
+
+### Required data
+- The platform relies on pre-seeded concept blueprints and quizzes inside the local Python database adapter (`backend/app/domain.py`). No external database file downloads are required to run the baseline or full evaluation.
+
+### Environment variables
+Create a local `.env` file containing the required API credentials inside the `backend/` directory:
+```env
+# API Keys
+GROQ_API_KEY=gsk_...
+GEMINI_API_KEY=...
+```
+
+Do not commit or submit `.env`.
+
+No `.env` file is included in the submission because it may contain secrets.
+
+---
+
+## 3. Booting the Application
 
 ### Start the Backend (FastAPI)
 1. Open a PowerShell/Terminal window.
@@ -38,8 +87,9 @@ LLM_MODEL=openai/gpt-oss-120b
 
 ---
 
-## 3. Running Automated Verification Scripts
-We have two backend verification scripts to test API compliance and grading quality.
+## 4. Running Automated Verification Scripts
+
+We have three backend verification scripts to test API compliance and grading quality.
 
 ### Test 1: Full Session API Verification
 Ensures all API endpoints (Sign Up, Log In, Start Session, Advance) transition correctly from `diagnose` all the way to `visualize`:
@@ -70,7 +120,23 @@ python run_five_problems_eval.py
 
 ---
 
-## 4. Live Demo Walkthrough (Video Script)
+## 5. Approximate Runtime & Cost
+
+### Runtime
+- Application startup: approximately 2 seconds (FastAPI + Vite dev server)
+- End-to-end solution run (Lessons + Visualizations + Practice): approximately 20-30 seconds
+- Baseline evaluation (`run_eval_comparison.py`): approximately 45-60 seconds
+- Full evaluation (`verify_session_flow.py`): approximately 30-40 seconds
+
+### Cost
+- Approximate cost per end-to-end run: $0.00 (leveraging Groq developer and Gemini API free tiers)
+- Approximate cost for the evaluation: $0.00
+
+*Costs vary based on LLM model, token usage, and API pricing.*
+
+---
+
+## 6. Live Demo Walkthrough (Video Script)
 
 This is the recommended sequence to demonstrate the platform for submission:
 
