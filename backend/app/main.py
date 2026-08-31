@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 from fastapi import FastAPI, HTTPException, Header
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 
-from .orchestrator import advance_session, start_session
+from .orchestrator import advance_session, start_session, regress_session
 from .schemas import (
     AnswerRequest,
     SessionAdvanceRequest,
@@ -11,6 +14,8 @@ from .schemas import (
     StudentSession,
     AuthRequest,
     AuthResponse,
+    ChatAskRequest,
+    ChatAskResponse,
 )
 from .state_store import (
     get_session,
@@ -21,6 +26,10 @@ from .state_store import (
 )
 
 app = FastAPI(title="Adaptive Learning Agent Auth")
+
+_IMAGES_DIR = Path(__file__).resolve().parent.parent / "generated_images"
+_IMAGES_DIR.mkdir(parents=True, exist_ok=True)
+app.mount("/static/images", StaticFiles(directory=str(_IMAGES_DIR)), name="images")
 
 app.add_middleware(
     CORSMiddleware,
@@ -82,6 +91,20 @@ def advance_api_session(
     return advance_session(session, answer=request.answer)
 
 
+@app.post("/api/session/regress", response_model=StudentSession)
+def regress_api_session(
+    request: SessionAdvanceRequest,
+    authorization: str | None = Header(None),
+) -> StudentSession:
+    username = get_user_from_token(authorization)
+    if not username:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    session = get_session(request.session_id)
+    if session.username != username:
+        raise HTTPException(status_code=403, detail="Forbidden: Session ownership mismatch")
+    return regress_session(session)
+
+
 @app.post("/api/session/answer", response_model=StudentSession)
 def submit_answer(
     request: AnswerRequest,
@@ -102,3 +125,24 @@ def submit_answer(
         "answer": request.answer,
     })
     return save_session(session)
+
+
+@app.post("/api/chat/ask", response_model=ChatAskResponse)
+def ask_chat_assistant(
+    request: ChatAskRequest,
+    authorization: str | None = Header(None),
+) -> ChatAskResponse:
+    from .agents import chat_assistant_agent
+
+    username = get_user_from_token(authorization)
+    if not username:
+        raise HTTPException(status_code=401, detail="Unauthorized")
+    session = get_session(request.session_id)
+    if session.username != username:
+        raise HTTPException(status_code=403, detail="Forbidden: Session ownership mismatch")
+
+    return chat_assistant_agent(
+        session=session,
+        user_question=request.user_question,
+        current_screen=request.current_screen,
+    )

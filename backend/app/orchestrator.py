@@ -14,9 +14,20 @@ from .agents import (
     visualization_agent_real,
     visualization_agent_bf_real,
 )
-from .domain import get_cs_dsa_adapter, register_dynamic_concept
+from .domain import get_concept_node, get_cs_dsa_adapter, get_diagnostic_quiz, register_dynamic_concept
+from .image_service import hero_image_url
 from .schemas import StudentSession
 from .state_store import get_session, save_session
+
+
+def _attach_quiz_and_hero(session: StudentSession, concept_id: str, title: str, definition: str, key_facts: list[str] | None = None) -> None:
+    """Warm-up quiz + hero illustration into session metadata (both best-effort)."""
+    quiz = get_diagnostic_quiz(concept_id)
+    session.metadata["diagnostic_quiz"] = [q.model_dump() for q in quiz]
+    try:
+        session.metadata["hero_image_url"] = None
+    except Exception:  # noqa: BLE001 — hero art must never break session start
+        session.metadata["hero_image_url"] = None
 
 
 def advance_session(session: StudentSession, answer: str | None = None) -> StudentSession:
@@ -52,9 +63,21 @@ def advance_session(session: StudentSession, answer: str | None = None) -> Stude
     if status == "explain":
         session.session_status = "visualize"
         vis_spec = visualization_agent_real(session)
-        vis_spec_bf = visualization_agent_bf_real(session)
+        # Check if topic has genuine dual algorithm comparison (e.g., curated CS/DSA brute force vs hashmap)
+        concept = session.concept_history[0] if session.concept_history else None
+        concept_id = session.metadata.get("concept_id", "")
+        has_dual = (
+            concept and concept.methods and len(concept.methods) >= 2 and
+            any("brute" in (m.id + m.name).lower() for m in concept.methods) and
+            not concept_id.startswith("custom-")
+        )
+        if has_dual:
+            vis_spec_bf = visualization_agent_bf_real(session)
+            session.interaction_state["current_visualization_bf"] = vis_spec_bf.model_dump(by_alias=True)
+        else:
+            session.interaction_state["current_visualization_bf"] = None
+
         session.interaction_state["current_visualization"] = vis_spec.model_dump(by_alias=True)
-        session.interaction_state["current_visualization_bf"] = vis_spec_bf.model_dump(by_alias=True)
         session.session_progress["completed_steps"] = ["diagnose", "plan", "explain", "visualize"]
         session.session_progress["next_best_action"] = "practice"
         session.metadata["agent_trace"].append({"step": "visualize", "agent": "VisualizationAgent"})
@@ -108,6 +131,44 @@ def advance_session(session: StudentSession, answer: str | None = None) -> Stude
     return save_session(session)
 
 
+def regress_session(session: StudentSession) -> StudentSession:
+    status = session.session_status
+
+    status_order = ["new", "diagnose", "plan", "explain", "visualize", "practice", "evaluate", "completed"]
+    if status in status_order:
+        idx = status_order.index(status)
+        if idx > 0:
+            new_status = status_order[idx - 1]
+            session.session_status = new_status
+
+            # Adjust completed steps and next best action
+            if new_status == "new":
+                session.session_progress["completed_steps"] = []
+                session.session_progress["next_best_action"] = "diagnose"
+            elif new_status == "diagnose":
+                session.session_progress["completed_steps"] = ["diagnose"]
+                session.session_progress["next_best_action"] = "plan"
+            elif new_status == "plan":
+                session.session_progress["completed_steps"] = ["diagnose", "plan"]
+                session.session_progress["next_best_action"] = "explain"
+            elif new_status == "explain":
+                session.session_progress["completed_steps"] = ["diagnose", "plan", "explain"]
+                session.session_progress["next_best_action"] = "visualize"
+            elif new_status == "visualize":
+                session.session_progress["completed_steps"] = ["diagnose", "plan", "explain", "visualize"]
+                session.session_progress["next_best_action"] = "practice"
+            elif new_status == "practice":
+                session.session_progress["completed_steps"] = ["diagnose", "plan", "explain", "visualize", "practice"]
+                session.session_progress["next_best_action"] = "evaluate"
+            elif new_status == "evaluate":
+                session.session_progress["completed_steps"] = ["diagnose", "plan", "explain", "visualize", "practice", "evaluate"]
+                session.session_progress["next_best_action"] = "completed"
+
+            return save_session(session)
+
+    return session
+
+
 def start_session(
     student_profile: Any | None = None,
     username: str | None = None,
@@ -123,23 +184,49 @@ def start_session(
 
     # Free-text topic request: synthesize a curriculum node for ANY topic on the fly.
     if topic_request and topic_request.strip():
-        blueprint = topic_synthesis_agent(
-            topic_request,
-            student_level=(session.student_profile.current_level if session.student_profile else "beginner"),
-        )
+        # ── Fast-path: check for pre-seeded demo blueprints first ──────────────
+        from .domain import get_topic_brief as _get_brief
+        _normalized = topic_request.strip().lower()
+        _PRESEED_KEYWORDS: dict[str, str] = {
+            "custom-photosynthesis": ["photosynthesis", "photo synthesis", "how plants make food", "how plants grow"],
+            "custom-digestive-system": ["digestive", "digestion", "digest", "how food is digested", "human digestion",
+                                        "digestive system", "how digestion works"],
+        }
+        _pre_blueprint = None
+        for _cid, _keywords in _PRESEED_KEYWORDS.items():
+            if any(kw in _normalized for kw in _keywords):
+                _pre_blueprint = _get_brief(_cid)
+                break
+
+        if _pre_blueprint is not None:
+            blueprint = _pre_blueprint
+        else:
+            blueprint = topic_synthesis_agent(
+                topic_request,
+                student_level=(session.student_profile.current_level if session.student_profile else "beginner"),
+            )
         node = register_dynamic_concept(blueprint)
         session.active_topic = node.title
         session.current_domain = node.domain
         session.current_subdomain = node.subdomain
         session.metadata["concept_id"] = node.concept_id
         session.metadata["topic_brief"] = blueprint.model_dump()
+        _attach_quiz_and_hero(
+            session,
+            blueprint.concept_id,
+            blueprint.title,
+            blueprint.canonical_definition,
+            blueprint.key_facts,
+        )
         session.metadata["agent_trace"].append({
             "step": "synthesize",
             "agent": "TopicSynthesisAgent",
             "topic_request": topic_request,
+            "pre_seeded": _pre_blueprint is not None,
         })
         session.session_status = "new"
         return save_session(session)
+
 
     target_node = adapter.concept_graph[0]
     if concept_id:
@@ -151,4 +238,10 @@ def start_session(
     session.active_topic = target_node.title
     session.session_status = "new"
     session.metadata["concept_id"] = target_node.concept_id
+    _attach_quiz_and_hero(
+        session,
+        target_node.concept_id,
+        target_node.title,
+        target_node.canonical_definition,
+    )
     return save_session(session)

@@ -121,3 +121,20 @@ By verifying the new additions using our automated test script (`run_five_proble
 5. **Valid Parentheses**: Genuinely matched stack dynamics. The Visualization Agent **successfully generated stack-specific LIFO spec** (`stackStructure` entity kind) instead of an array layout. Caught the naive bracket count misconception and routed to `visualize` retry state with difficulty `easy`.
 
 **Known limitations, stated directly:** This build proves the multi-agent loop on 6 standard DSA concepts in the Arrays/Strings sub-domain. While the visualization primitives (such as arrays, comparisons, and stacks) are generic, expanding to non-linear graphs or non-CS domains would require implementing new UI rendering shapes. Evaluation was tested against a hand-picked set of misconception inputs rather than a large blind student population.
+
+---
+
+## 🚀 Final Iterations & Robust Fallbacks
+
+In our final development phases, we implemented critical robustness fixes to make the app demo-ready and completely resilient to API rate-limiting:
+
+1. **Flexbox Process Rendering**: Replaced absolute coordinate timelines in the sequential player with a centered horizontal flexbox layout. This guarantees that process nodes never overlap on varying viewport sizes, links are clearly demarcated with styled arrow SVGs, and the active stage pointer follows layout states smoothly.
+2. **Backward Navigation**: Built backward routing into the backend session controller (`regress_session`) and wired Back buttons to the `Lesson`, `Visualizer`, `Challenge`, and `Feedback` screens, allowing candidates to regress the session state.
+3. **Mastery Score Data-Binding**: Addressed a layout bug on the completed Summary screen by binding values to read from both the latest evaluation and the session's historical `mastery_trend` list, ensuring the mastery ring always animates to its true percentage.
+4. **Custom Layout Sorting**: Solved a layout bug on custom synthesized topics (such as the Water Cycle) where descriptive stage IDs (e.g. "evaporation") broke the index-based parser and sorting. Refactored the stage filter to dynamically include all box/node entities and sorted them by horizontal x-coordinate to ensure correct chronological visual flow layouts.
+
+---
+
+## 📝 Agent Trajectories Reference
+
+The full representative trajectories, including system prompts, input parameters, reasoning pathways, and JSON outputs for all 5 active agents (Diagnostic, Concept, Visualization, Evaluation, Adaptation), are fully documented in [`agent_trajectories.md`](file:///c:/Users/bhava/Downloads/Micron-Hackathon-main/Micron-Hackathon-main/agent_trajectories.md).

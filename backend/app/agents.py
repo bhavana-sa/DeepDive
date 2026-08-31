@@ -1,13 +1,18 @@
+# -*- coding: utf-8 -*-
 from __future__ import annotations
+
 
 import json
 import logging
+import re
 from typing import Any
 
 from .domain import get_concept_node, get_topic_brief
 from .llm_client import call_structured_llm
 from .schemas import (
     AdaptationDecision,
+    ChatAskRequest,
+    ChatAskResponse,
     ConceptModel,
     DiagnosticReport,
     EvaluationResult,
@@ -15,8 +20,14 @@ from .schemas import (
     ExerciseTask,
     LearningPlan,
     MethodModel,
+    QuizQuestion,
+    SceneActor,
+    SceneEffect,
+    SceneScript,
+    SceneStep,
     StudentSession,
     TopicBlueprint,
+    VisualizationClassifier,
     VisualizationEntity,
     VisualizationQuestion,
     VisualizationRelation,
@@ -43,65 +54,133 @@ def _topic_synthesis_fallback(topic_request: str) -> TopicBlueprint:
         ch if ch.isalnum() else "-" for ch in topic.lower()
     ).strip("-")[:40]
     title = topic if len(topic) <= 80 else topic[:77] + "..."
-    return TopicBlueprint(
+    _tf = TopicBlueprint(
         concept_id=slug,
         title=title,
         domain="Custom",
         subdomain="Learner Requested",
         canonical_definition=(
-            f"A structured walkthrough of {title}: what it is, why it matters, and how its "
-            "core mechanism works step by step."
+            f"{title} is a core domain concept that connects starting conditions to observable outcomes "
+            f"through a structured, step-by-step mechanism."
         ),
         key_facts=[
-            f"What {title} fundamentally is",
-            f"How {title} works step by step",
-            f"Where {title} applies and where it breaks down",
+            f"{title} operates through a specific transformation sequence rather than random events.",
+            f"Key variables in {title} adjust dynamically in response to system changes.",
+            f"Understanding {title} allows predicting outcomes in real-world scenarios.",
         ],
-        prerequisites=["basic background knowledge"],
+        prerequisites=["basic background knowledge", "curiosity about how systems work"],
         misconceptions=[
-            f"memorizing the definition of {title} is the same as understanding it",
-            "the steps can be performed in any order",
-            "understanding the summary means no need to work an example",
+            f"Knowing the name of {title} means you understand its underlying mechanism",
+            f"The steps in {title} happen independently without affecting each other",
+            f"{title} is static and never adapts to changing external factors",
         ],
         explanation_depths=[
-            f"simple intuition: what {title} is in one sentence",
-            "mechanism: the step-by-step process",
-            "application: where and why it is used",
+            f"{title} intuition: core relationship between inputs and outputs",
+            f"{title} mechanism: step-by-step operational flow",
+            f"{title} application: real-world impact and constraints",
         ],
-        input_display=title,
-        example_values=["step 1", "step 2", "step 3"],
-        example_walkthrough=f"A concrete example of {title} worked through step by step.",
-        practice_challenge=f"Explain in your own words how {title} works and why.",
+        narrative_intuition=(
+            f"Imagine you are observing {title} in action for the first time. "
+            f"At its heart, {title} is about how inputs are transformed into expected outputs. "
+            f"Instead of viewing it as abstract theory, think of it as a set of rules where every action triggers a direct, logical reaction."
+        ),
+        deep_mechanism=(
+            f"The mechanism of {title} unfolds in distinct phases:\n"
+            f"1. Setup & Baseline: Initial state is established with starting parameters.\n"
+            f"2. Trigger & Interaction: Elements interact according to core domain rules.\n"
+            f"3. Transformation: Intermediate state resolves into the final observable outcome."
+        ),
+        real_world_scenario=(
+            f"In real life, {title} can be seen whenever systems need to balance competing forces or process inputs efficiently. "
+            f"For instance, when conditions shift suddenly, {title} governs how stability is restored."
+        ),
+        common_pitfalls=[
+            f"Confusing correlation with causation when observing {title}.",
+            f"Assuming all steps in {title} have equal weight regardless of initial conditions.",
+        ],
+        input_display=f"{title}: input → mechanism → output",
+        example_values=["start", "process", "result"],
+        example_walkthrough=f"Step 1: Identify starting values. Step 2: Apply transformation rules. Step 3: Verify the outcome.",
+        practice_challenge=f"In your own words, explain how {title} works and describe a real situation where you would observe it.",
     )
+
+    # Topic-aware fallback quiz built from the blueprint's own facts/misconceptions.
+    facts = [f for f in _tf.key_facts]
+    myths = [m for m in _tf.misconceptions]
+    tokens = _tf.example_values
+    quiz = []
+    if facts and len(myths) >= 2:
+        opts = [facts[0], myths[0], myths[1], f"{title} has no cause-and-effect structure"]
+        quiz.append(QuizQuestion(
+            question=f"Which statement about {title} is actually TRUE?",
+            options=opts,
+            correct_index=0,
+            misconception_tag=myths[0][:60],
+            explanation=facts[0],
+        ))
+    if len(facts) > 1 and len(myths) >= 3:
+        opts = [facts[1], myths[2], "It works differently every time, with no rules", "Only experts can ever trace how it works"]
+        quiz.append(QuizQuestion(
+            question=f"Someone claims: '{myths[2] if len(myths) > 2 else myths[0]}' — what's the best response?",
+            options=opts,
+            correct_index=0,
+            misconception_tag=myths[2][:60] if len(myths) > 2 else myths[0][:60],
+            explanation=facts[1],
+        ))
+    if len(tokens) >= 3:
+        quiz.append(QuizQuestion(
+            question=f"In a concrete run of {title}, which stage follows '{tokens[0]}'?",
+            options=[tokens[1], tokens[2], tokens[0], "the process restarts from scratch"],
+            correct_index=0,
+            misconception_tag="sequence not understood",
+            explanation=f"The mechanism runs {tokens[0]} → {tokens[1]} → {tokens[2]}.",
+        ))
+    if len(quiz) < 3:
+        quiz.append(QuizQuestion(
+            question=f"What's the smartest way to actually understand {title}?",
+            options=[
+                "Trace one concrete example end to end",
+                "Memorize the definition word for word",
+                "Skip the mechanism and learn buzzwords",
+                "Assume it works like everything else",
+            ],
+            correct_index=0,
+            misconception_tag="memorization over mechanism",
+            explanation="Tracing a concrete example exposes the actual cause-and-effect chain.",
+        ))
+    _tf.diagnostic_quiz = quiz[:3]
+    return _tf
 
 
 def topic_synthesis_agent(topic_request: str, student_level: str = "beginner") -> TopicBlueprint:
     """Synthesize a full curriculum blueprint for an arbitrary learner-requested topic."""
     system_prompt = (
-        "You are a curriculum-synthesis agent for an adaptive learning platform. "
-        "A learner wants to learn ANY topic they typed — it may be computer science, science, "
-        "history, economics, a language, a tool, or anything else. "
-        "Design a focused micro-lesson blueprint for that topic.\n"
-        "Rules:\n"
-        "  1. concept_id: a short kebab-case slug prefixed with 'custom-'.\n"
-        "  2. title: a clean human-readable lesson title (max ~80 chars).\n"
-        "  3. canonical_definition: 2-4 sentences defining the topic precisely.\n"
-        "  4. key_facts: 3-5 ground-truth statements a correct explanation MUST contain. "
-        "These are used later as grading criteria, so make them specific and verifiable.\n"
-        "  5. prerequisites: 2-4 things worth knowing first.\n"
-        "  6. misconceptions: 3-4 common wrong beliefs about this topic, phrased the way a "
-        "student would state them (first person, specific, falsifiable). These are matched "
-        "against student answers later, so do not make them vague.\n"
-        "  7. explanation_depths: 3 entries from simple intuition to mechanism to application.\n"
-        "  8. input_display: ONE short line (max ~60 chars) showing a concrete input/state the "
-        "animated visualizer can display, e.g. 'array = [4, -2, 7], target = 5' or "
-        "'stage: pollination' or 'plaintext -> [encrypt] -> ciphertext'.\n"
-        "  9. example_values: 3-6 short single-word/single-token strings (max 8 chars each) that "
-        "represent the concrete example states the visualizer will animate as boxes.\n"
-        "  10. example_walkthrough: a concrete worked example of the topic in 3-5 discrete steps, "
-        "with real values. The visualization agent will animate exactly this.\n"
-        "  11. practice_challenge: ONE open question asking the student to explain the core "
-        "mechanism in their own words — answerable by typing a short paragraph."
+        "You are a master educator and curriculum-synthesis agent for an adaptive learning platform. "
+        "A learner wants to learn ANY topic they typed — it may be computer science, physics, economics, "
+        "biology, history, music theory, a software tool, or anything else.\n"
+        "Design a rich, engaging micro-lesson blueprint for that topic.\n\n"
+        "REQUIREMENTS FOR CONCEPTUAL DEPTH:\n"
+        "  1. concept_id: short kebab-case slug prefixed with 'custom-'.\n"
+        "  2. title: clean human-readable lesson title (max ~80 chars).\n"
+        "  3. canonical_definition: 2-4 clear sentences defining the topic precisely.\n"
+        "  4. key_facts: 3-5 ground-truth statements explaining core principles.\n"
+        "  5. narrative_intuition: 2-3 detailed paragraphs building a vivid, clear analogy/story "
+        "that makes the concept instantly intuitive for a first-time learner. Write rich prose!\n"
+        "  6. deep_mechanism: 2-3 detailed paragraphs explaining EXACTLY how it works step-by-step, "
+        "the underlying rules, state changes, and mechanics. Write deep, engaging educational prose!\n"
+        "  7. real_world_scenario: 1-2 paragraphs giving a concrete, real-life case study or example "
+        "showing where and why this concept matters in practice.\n"
+        "  8. common_pitfalls: 2-3 common misconceptions or traps explained with clear explanations of why they occur.\n"
+        "  9. input_display: ONE short line (max ~60 chars) showing the visualizer input state.\n"
+        "  10. example_values: 3-6 short single-word/token strings representing states for the visualizer.\n"
+        "  11. example_walkthrough: a concrete worked example with step-by-step numbers/labels.\n"
+        "  12. practice_challenge: ONE open-ended prompt asking the student to explain the mechanism in their own words.\n"
+        "  13. diagnostic_quiz: EXACTLY 3 highly valid, topic-specific multiple-choice warm-up questions. "
+        "Each question must test real domain intuitions for THIS specific topic (e.g. for Supply & Demand, test price adjustments when supply drops; for WiFi, test radio wave transmission; for black holes, test what happens to light near the event horizon). "
+        "Every question and option must mention concrete entities of the topic itself (objects, forces, steps, values). "
+        "FORBIDDEN: questions about 'inputs' and 'outputs' as abstract words, 'step 1 vs step 2', how the app works, or any meta/placeholder phrasing — those are instant failures. "
+        "Make at least one question a mini-scenario: 'If X happens, what does the topic predict?' "
+        "Provide 4 plausible options, correct_index (0-3), misconception_tag, and a 1-sentence explanation."
     )
     user_prompt = json.dumps({
         "topic_request": topic_request,
@@ -114,6 +193,55 @@ def topic_synthesis_agent(topic_request: str, student_level: str = "beginner") -
         response_model=TopicBlueprint,
         fallback=lambda: _topic_synthesis_fallback(topic_request),
     )
+
+
+def chat_assistant_agent(
+    session: StudentSession,
+    user_question: str,
+    current_screen: str = "general",
+) -> ChatAskResponse:
+    """Fast 1-2 sentence AI assistant (DeepBot) answering learner questions on any screen."""
+    concept = session.concept_history[0] if session.concept_history else None
+    brief = get_topic_brief(session.metadata.get("concept_id", ""))
+    topic = session.active_topic
+
+    title = concept.title if concept else (brief.title if brief else topic)
+    definition = concept.canonical_definition if concept else (brief.canonical_definition if brief else "")
+    facts = concept.key_facts if concept else (brief.key_facts if brief else [])
+
+    system_prompt = (
+        "You are DeepBot, a friendly, ultra-clear AI learning companion owl. "
+        f"The student is on the '{current_screen}' screen studying '{title}'.\n"
+        f"Context definition: {definition}\n"
+        f"Key facts: {'; '.join(facts[:3])}\n\n"
+        "Your task: Answer the student's question in EXACTLY 1 to 2 short, crisp, encouraging sentences. "
+        "Be extremely clear and educational. Do not use buzzwords or long bullet lists. "
+        "Also provide 2 short (3-5 word) suggested follow-up question chips in 'suggested_followups'."
+    )
+    user_prompt = json.dumps({
+        "user_question": user_question,
+        "screen": current_screen,
+        "output_type": "ChatAskResponse",
+    })
+
+    def _fallback() -> ChatAskResponse:
+        return ChatAskResponse(
+            reply=f"Great question! In {title}, the core idea is to focus on how the mechanism transforms the input step by step.",
+            suggested_followups=["Explain simpler", "Give an example"],
+        )
+
+    try:
+        return call_structured_llm(
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            response_model=ChatAskResponse,
+            fallback=_fallback,
+            timeout_seconds=8,
+            max_attempts=1,
+        )
+    except Exception:
+        return _fallback()
+
 
 
 def _diagnostic_fallback(session: StudentSession) -> DiagnosticReport:
@@ -131,37 +259,88 @@ def _diagnostic_fallback(session: StudentSession) -> DiagnosticReport:
 def _concept_fallback(session: StudentSession) -> ConceptModel:
     concept_id = session.metadata.get("concept_id", "two-sum-hashmap")
     node = get_concept_node(concept_id)
-            
-    # Mock fallback methods depending on the concept
-    fallback_methods = [
-        MethodModel(
-            id="brute-force",
-            name="Naive / Brute Force Approach",
-            explanation=f"A naive O(N²) comparison approach to solve {node.title}.",
-            complexity={"time": "O(N²)", "space": "O(1)"},
-            code="# Naive approach implementation\npass",
-            visualization_spec_ref="bf-visual"
-        ),
-        MethodModel(
-            id="optimized",
-            name="Optimized Approach",
-            explanation=f"An efficient O(N) optimized approach to solve {node.title}.",
-            complexity={"time": "O(N)", "space": "O(N)"},
-            code="# Optimized approach implementation\npass",
-            visualization_spec_ref="optimized-visual"
-        )
-    ]
-    
+    brief = get_topic_brief(concept_id)
+
+    # Use real key_facts from blueprint if available, otherwise node explanation depths
+    if brief and brief.key_facts:
+        key_facts = brief.key_facts
+    elif node.explanation_depths:
+        key_facts = node.explanation_depths
+    else:
+        key_facts = [f"{node.title} has a core mechanism that drives its behavior"]
+
+    # For DSA concepts use algorithm-style methods; for custom topics use generic approaches
+    is_dsa = node.domain in ("CS",) and concept_id != concept_id.startswith("custom-")
+    if brief:  # custom synthesized topic
+        approach_name = brief.title
+        step1 = brief.example_walkthrough.split(".")[0] if brief.example_walkthrough else f"Initial approach to {brief.title}"
+        fallback_methods = [
+            MethodModel(
+                id="naive-approach",
+                name=f"Basic Approach",
+                explanation=f"The straightforward way to understand {brief.title}: {brief.explanation_depths[0] if brief.explanation_depths else step1}.",
+                complexity={"time": "n/a", "space": "n/a"},
+                code=f"# Basic approach\n# {brief.example_walkthrough[:100] if brief.example_walkthrough else 'Step through the process manually'}",
+                visualization_spec_ref="naive-visual"
+            ),
+            MethodModel(
+                id="optimized-approach",
+                name=f"Deeper Understanding",
+                explanation=f"A deeper view of {brief.title}: {brief.explanation_depths[-1] if len(brief.explanation_depths) > 1 else brief.canonical_definition}.",
+                complexity={"time": "n/a", "space": "n/a"},
+                code=f"# Optimized approach\n# {brief.canonical_definition[:100]}",
+                visualization_spec_ref="optimized-visual"
+            )
+        ]
+    else:
+        fallback_methods = [
+            MethodModel(
+                id="brute-force",
+                name="Naive / Brute Force Approach",
+                explanation=f"A naive O(N\u00b2) comparison approach to solve {node.title}.",
+                complexity={"time": "O(N\u00b2)", "space": "O(1)"},
+                code="# Naive approach implementation\nfor i in range(len(nums)):\n    for j in range(i+1, len(nums)):\n        pass",
+                visualization_spec_ref="bf-visual"
+            ),
+            MethodModel(
+                id="optimized",
+                name="Optimized Approach",
+                explanation=f"An efficient O(N) optimized approach to solve {node.title}.",
+                complexity={"time": "O(N)", "space": "O(N)"},
+                code="# Optimized approach implementation\nseen = {}\nfor i, val in enumerate(nums):\n    pass",
+                visualization_spec_ref="optimized-visual"
+            )
+        ]
+
     return ConceptModel(
         concept_id=node.concept_id,
         title=node.title,
         canonical_definition=node.canonical_definition,
-        key_facts=[f"Core fact for {node.title}: " + fact for fact in node.explanation_depths],
+        key_facts=key_facts,
         prerequisites=node.prerequisites,
         misconceptions=node.misconceptions,
         explanation_summary=node.canonical_definition,
         teaching_emphasis=[node.title],
-        methods=fallback_methods
+        methods=fallback_methods,
+        narrative_intuition=(
+            brief.narrative_intuition if brief and brief.narrative_intuition else
+            f"Think of {node.title} as a fundamental mechanism connecting inputs to outcomes. "
+            f"Instead of memorizing definitions, imagine walking through a real example step by step to see how each action triggers a logical reaction."
+        ),
+        deep_mechanism=(
+            brief.deep_mechanism if brief and brief.deep_mechanism else
+            f"The underlying mechanism of {node.title} operates in clear stages:\n"
+            f"1. Setup: Starting parameters and input data are loaded.\n"
+            f"2. Processing: Core rules and transformations are applied sequentially.\n"
+            f"3. Resolution: The final state is computed and verified."
+        ),
+        real_world_scenario=(
+            brief.real_world_scenario if brief and brief.real_world_scenario else
+            f"In practical applications, {node.title} is utilized wherever efficient processing and predictable outcomes are essential."
+        ),
+        common_pitfalls=(
+            brief.common_pitfalls if brief and brief.common_pitfalls else node.misconceptions
+        ),
     )
 
 
@@ -224,8 +403,96 @@ def diagnostic_agent_real(session: StudentSession) -> DiagnosticReport:
 
 def concept_agent_real(session: StudentSession) -> ConceptModel:
     concept_id = session.metadata.get("concept_id", "two-sum-hashmap")
-    node = get_concept_node(concept_id)
+    brief = get_topic_brief(concept_id)
 
+    # ── Custom / free-text topic: bypass pre-authored ConceptNode entirely ──────
+    # The TopicBlueprint is the ground truth for any learner-requested topic.
+    # We never touch get_concept_node() for these — the generated node would only
+    # contain auto-filled placeholder prose derived from the slug, not real facts.
+    if brief:
+        diagnosis = session.diagnosis or DiagnosticReport(
+            understanding=[],
+            missing_prerequisites=brief.prerequisites,
+            misconceptions=[],
+            confidence=0.5,
+            summary="No prior diagnosis available."
+        )
+
+        stage_list = (
+            f"The topic has {len(brief.example_values)} sequential stages: "
+            + " → ".join(brief.example_values)
+            if brief.example_values else ""
+        )
+
+        method_instruction = (
+            "You must generate exactly 2 methods in the 'methods' field. "
+            f"This is a '{brief.domain}' topic (domain: {brief.subdomain}), so the approaches must be "
+            "conceptually meaningful ways to understand or explore this topic — NOT generic CS patterns. "
+            "For example, for 'The Digestive System', methods could be 'Mechanical Digestion' vs 'Chemical Digestion'. "
+            "For 'Photosynthesis' they could be 'Light Reactions' vs 'Calvin Cycle'. "
+            "Use id values like 'approach-1' and 'approach-2'. "
+            "Set complexity.time and complexity.space to 'n/a' for non-computational topics. "
+            "The 'code' field should contain a structured outline or key facts — not Python unless the topic is programming."
+        )
+
+        system_prompt = (
+            "You are a master concept-explainer agent for an adaptive learning platform. "
+            "A learner has asked about a topic. Use the blueprint below as your ONLY source of truth — "
+            "do NOT invent facts beyond what is grounded in the blueprint.\n\n"
+            "CRITICAL — populate ALL of these fields with rich, factually accurate, topic-specific content:\n"
+            "  narrative_intuition: 2-3 paragraphs building vivid intuition with concrete analogy or story.\n"
+            "  deep_mechanism: 2-3 paragraphs explaining EXACTLY how it works step-by-step, naming the "
+            "  specific entities, transformations, and state changes (e.g. 'the stomach churns food into chyme').\n"
+            "  real_world_scenario: 1-2 paragraphs with a real-world case showing why this matters.\n"
+            "  common_pitfalls: 2-3 specific misconceptions students hold about THIS topic.\n"
+            "  key_facts: 3-5 specific, verifiable facts about THIS topic — not generic placeholders.\n"
+            "  explanation_summary: 2-3 sentence clear summary.\n"
+            f"  {stage_list}\n\n"
+            + method_instruction
+            + "\nEach method must have: id, name, explanation, complexity dict (keys: 'time', 'space'), "
+            "and a 'code' field with a structured outline of the approach."
+        )
+        user_prompt = json.dumps({
+            "topic_title": brief.title,
+            "canonical_definition": brief.canonical_definition,
+            "key_facts": brief.key_facts,
+            "stages_or_entities": brief.example_values,
+            "example_walkthrough": brief.example_walkthrough,
+            "misconceptions": brief.misconceptions,
+            "narrative_intuition_draft": brief.narrative_intuition,
+            "deep_mechanism_draft": brief.deep_mechanism,
+            "real_world_scenario_draft": brief.real_world_scenario,
+            "common_pitfalls_draft": brief.common_pitfalls,
+            "diagnostic_report": diagnosis.model_dump(),
+            "output_type": "ConceptModel",
+        })
+        try:
+            model = call_structured_llm(
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                response_model=ConceptModel,
+                fallback=lambda: _concept_fallback(session),
+            )
+            # Guarantee narrative fields — fall back to blueprint if LLM left them empty
+            if not model.narrative_intuition and brief.narrative_intuition:
+                model.narrative_intuition = brief.narrative_intuition
+            if not model.deep_mechanism and brief.deep_mechanism:
+                model.deep_mechanism = brief.deep_mechanism
+            if not model.real_world_scenario and brief.real_world_scenario:
+                model.real_world_scenario = brief.real_world_scenario
+            if not model.common_pitfalls and brief.common_pitfalls:
+                model.common_pitfalls = brief.common_pitfalls
+            if not model.key_facts and brief.key_facts:
+                model.key_facts = brief.key_facts
+            log_agent_call(session, "ConceptAgent", {"target": session.active_topic, "llm_output": model.model_dump()})
+            return model
+        except Exception:
+            fallback = _concept_fallback(session)
+            log_agent_call(session, "ConceptAgent", {"target": session.active_topic, "fallback_used": True})
+            return fallback
+
+    # ── Curated DSA/pre-authored topic: original ConceptNode-based path ──────────
+    node = get_concept_node(concept_id)
     diagnosis = session.diagnosis or DiagnosticReport(
         understanding=[],
         missing_prerequisites=node.prerequisites,
@@ -233,25 +500,35 @@ def concept_agent_real(session: StudentSession) -> ConceptModel:
         confidence=0.5,
         summary="No prior diagnosis available."
     )
-    system_prompt = (
-        "You are a concept-explainer agent. Use the provided ground-truth concept node as the source of truth. "
-        "Keep the explanation in plain language, tailored to the student's current skill level and misconceptions. "
-        "If the student seems to believe a listed misconception, explicitly correct it. "
-        "Do not contradict the domain adapter's core facts.\n"
-        "You must generate a list of 2-3 different approaches in the 'methods' field. "
+
+    method_instruction = (
+        "You must generate a list of 2-3 different algorithmic approaches in the 'methods' field. "
         f"For {node.title}, include an initial/naive approach (id should contain 'brute' or 'naive') and "
-        "one or two better approaches that solve, apply, or explain this concept. "
-        "The topic may be any subject (CS, science, history, etc.): for computational topics the approaches are "
-        "algorithms with time/space complexity; for non-computational topics the approaches are different ways to "
-        "model, execute, or understand the process, and the complexity dictionary should use the keys 'time' and "
-        "'space' with honest values (use 'n/a' when a dimension genuinely does not apply). "
-        "Each method must have: id, name, explanation, complexity dictionary (with keys 'time' and 'space'), "
-        "and clean code or pseudocode in 'code' that demonstrates the approach."
+        "one or two better approaches. Each must have proper time/space complexity."
+    )
+
+    system_prompt = (
+        "You are a master concept-explainer agent for an adaptive learning platform. "
+        "Use the provided ground-truth concept node as the source of truth. "
+        "Write in plain, engaging language tailored to the student's current skill level.\n\n"
+        "CRITICAL — you MUST populate ALL of these fields with rich, detailed content:\n"
+        "  narrative_intuition: 2-3 paragraphs building vivid, clear intuition with analogy or story. "
+        "Write as if explaining to a curious 18-year-old for the first time. Be specific and concrete.\n"
+        "  deep_mechanism: 2-3 paragraphs explaining EXACTLY how it works step-by-step with real examples "
+        "and numbers. Name the specific rules, transformations, and state changes.\n"
+        "  real_world_scenario: 1-2 paragraphs with a concrete real-world case study showing why this matters.\n"
+        "  common_pitfalls: 2-3 misconceptions students commonly hold, with clear explanations.\n"
+        "  key_facts: 3-5 specific verifiable facts — NOT generic placeholders.\n"
+        "  explanation_summary: 2-3 sentence clear summary.\n\n"
+        + method_instruction
+        + "\nEach method must have: id, name, explanation, complexity dict (keys: 'time', 'space'), "
+        "and a 'code' field with a clear pseudocode or outline."
     )
     user_prompt = json.dumps({
         "concept": node.model_dump(),
         "diagnostic_report": diagnosis.model_dump(),
         "output_type": "ConceptModel",
+        "topic": session.active_topic,
     })
     try:
         model = call_structured_llm(
@@ -274,27 +551,64 @@ def diagnostic_agent_stub(session: StudentSession) -> DiagnosticReport:
     return _diagnostic_fallback(session)
 
 
-def planner_agent_stub(session: StudentSession) -> LearningPlan:
+def planner_agent_real(session: StudentSession) -> LearningPlan:
+    """LLM-powered planner that tailors the learning sequence to diagnosis + topic."""
     log_agent_call(session, "PlannerAgent", {"active_topic": session.active_topic})
     topic = session.active_topic
     brief = get_topic_brief(session.metadata.get("concept_id", ""))
-    prereq_step = (
-        f"Identify the missing prerequisite: {brief.prerequisites[0]}"
-        if brief and brief.prerequisites
-        else "Identify the missing prerequisite knowledge"
+    concept_id = session.metadata.get("concept_id", "")
+    node = get_concept_node(concept_id)
+    diagnosis = session.diagnosis
+
+    def _fallback() -> LearningPlan:
+        prereq_step = (
+            f"Address prerequisite: {brief.prerequisites[0]}"
+            if brief and brief.prerequisites
+            else "Identify the missing prerequisite knowledge"
+        )
+        return LearningPlan(
+            goal=f"Explain how {topic} works and verify deep understanding, not just recognition",
+            target_concept=topic,
+            steps=[
+                prereq_step,
+                f"Walk through the initial/basic approach to {topic}",
+                f"Compare with the best/optimized approach and explain why it is better",
+                "Confirm understanding via prediction and reasoning"
+            ],
+            time_budget_minutes=20,
+            rationale=f"Target the core mechanism of {topic} before discussing details."
+        )
+
+    system_prompt = (
+        "You are a curriculum planner agent for an adaptive learning platform. "
+        "Design a focused 20-minute lesson plan tailored to this student's diagnosed gaps. "
+        "The topic can be ANY domain (CS, science, history, economics, etc). "
+        "Output a LearningPlan JSON with: goal (1 sentence), target_concept, steps (3-5 action strings), "
+        "time_budget_minutes (integer), and rationale (2-3 sentences explaining why this sequence). "
+        "Make the steps specific to the actual topic — no generic placeholders."
     )
-    return LearningPlan(
-        goal=f"Explain how {topic} works and verify real understanding, not just recognition",
-        target_concept=topic,
-        steps=[
-            prereq_step,
-            f"Walk through the naive/initial approach to {topic}",
-            f"Compare with the optimized/best approach and why it wins",
-            "Check prediction and reasoning before moving on"
-        ],
-        time_budget_minutes=25,
-        rationale=f"The student's diagnosis shows the real gap; the plan targets the core mechanism of {topic} before its details."
-    )
+    user_prompt = json.dumps({
+        "topic": topic,
+        "prerequisites": (brief.prerequisites if brief else node.prerequisites),
+        "misconceptions_to_address": (diagnosis.misconceptions if diagnosis else []),
+        "student_level": (session.student_profile.current_level if session.student_profile else "beginner"),
+        "output_type": "LearningPlan",
+    })
+    try:
+        plan = call_structured_llm(
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            response_model=LearningPlan,
+            fallback=_fallback,
+        )
+        return plan
+    except Exception:
+        return _fallback()
+
+
+def planner_agent_stub(session: StudentSession) -> LearningPlan:
+    """Alias kept for backward compatibility — now calls the real agent."""
+    return planner_agent_real(session)
 
 
 def concept_agent_stub(session: StudentSession) -> ConceptModel:
@@ -302,28 +616,875 @@ def concept_agent_stub(session: StudentSession) -> ConceptModel:
     return _concept_fallback(session)
 
 
-def _visualization_fallback(session: StudentSession) -> VisualizationSpec:
+# ── Scene script helpers: generic animated scene used when the LLM omits/fails ──
+
+_SCENE_ACTIONS = (
+    "appear, disappear, move, pulse, shake, split, merge, fill, increment, "
+    "highlight, dim, connect, emit"
+)
+
+_SCENE_KINDS = (
+    "box, token, node, sun, drop, bubble, arrow, counter, chip, meter, lane, creature, stack"
+)
+
+# Keyword → emoji for dressing fallback stage boxes with meaningful icons.
+_STAGE_ICON_MAP: tuple[tuple[str, str], ...] = (
+    ("intake", "🌀"), ("suction", "🌀"), ("air", "💨"), ("fuel", "⛽"),
+    ("compress", "🔒"), ("power", "💥"), ("combust", "💥"), ("exhaust", "💨"),
+    ("ignit", "⚡"), ("spark", "⚡"), ("piston", "🔧"), ("engine", "⚙️"),
+    ("gear", "⚙️"), ("motor", "⚙️"), ("turbine", "🌀"), ("wheel", "🛞"),
+    ("idle", "🅿️"), ("accelerat", "🚀"), ("cruis", "🛣️"), ("decelerat", "🛑"),
+    ("brak", "🛑"), ("pump", "💧"), ("water", "💧"), ("rain", "🌧️"),
+    ("evaporat", "☀️"), ("condens", "☁️"), ("digest", "🍽️"), ("absorb", "🩸"),
+    ("photosynth", "🌱"), ("heart", "❤️"), ("blood", "🩸"), ("lung", "🫁"),
+    ("brain", "🧠"), ("signal", "📡"), ("data", "📊"), ("money", "💵"),
+    ("price", "🏷️"), ("market", "🏪"), ("plant", "🌱"), ("grow", "🌱"),
+    ("seed", "🌰"), ("energy", "⚡"), ("heat", "🔥"), ("cool", "❄️"),
+    ("light", "💡"), ("sound", "🔊"), ("start", "▶️"), ("input", "📥"),
+    ("output", "📤"), ("result", "🏁"), ("process", "⚙️"), ("collect", "🧺"),
+    ("parse", "🔍"), ("train", "🏋️"), ("deploy", "🚀"), ("test", "🧪"),
+)
+_STAGE_DIGIT_ICONS = ("1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣")
+
+
+def _stage_icon(text: str, index: int) -> str:
+    """Pick a meaningful emoji for a fallback stage box from its label."""
+    t = (text or "").lower()
+    for key, emoji in _STAGE_ICON_MAP:
+        if key in t:
+            return emoji
+    return _STAGE_DIGIT_ICONS[index % len(_STAGE_DIGIT_ICONS)]
+
+
+def _stage_facts(brief, tokens: list[str]) -> list[str]:
+    """Best-effort real fact per stage, sourced from the topic blueprint.
+
+    Priority: numbered walkthrough steps ("Step 1:" or "1." style) →
+    walkthrough sentences → key facts → generic mechanism phrasing.
+    Returned list always has len(tokens) entries, each trimmed to fit the
+    info chip.
+    """
+    n = len(tokens)
+    candidates: list[list[str]] = []
+    if brief is not None and getattr(brief, "example_walkthrough", ""):
+        wt = brief.example_walkthrough
+        # "Step 1: ... Step 2: ..." style
+        parts = [
+            p.strip(" .") for p in
+            re.split(r"Step\s*\d+\s*[:.\-–]?\s*", wt, flags=re.IGNORECASE)
+            if p.strip(" .")
+        ]
+        candidates.append(parts)
+        # "1. Intake: ... 2. Compression: ..." style
+        parts = [
+            p.strip(" .") for p in
+            re.split(r"(?:^|\s)\d+[.)]\s+", wt)
+            if p.strip(" .")
+        ]
+        candidates.append(parts)
+        # plain sentences
+        parts = [s.strip() for s in re.split(r"(?<=[.!?])\s+", wt) if s.strip()]
+        candidates.append(parts)
+
+    sentences: list[str] = []
+    for cand in candidates:
+        if len(cand) >= n:
+            sentences = cand
+            break
+    if not sentences:
+        for cand in candidates:
+            if cand:
+                sentences = cand
+                break
+    if len(sentences) < n and brief is not None:
+        for fact in getattr(brief, "key_facts", []) or []:
+            if len(sentences) >= n:
+                break
+            if fact not in sentences:
+                sentences.append(fact)
+
+    default = lambda i: f"{tokens[i]} transforms the input before handing it to the next stage."
+    facts: list[str] = []
+    for i in range(n):
+        raw = sentences[i] if i < len(sentences) else default(i)
+        raw = re.sub(r"\*+", "", raw)  # strip markdown emphasis
+        # Drop a leading restatement of the stage's own name ("Intake – ...")
+        m = re.match(rf"^{re.escape(tokens[i])}\s*[:\-–—]\s*(.+)$", raw, re.IGNORECASE)
+        if m:
+            raw = m.group(1).strip()
+        facts.append(raw if len(raw) <= 80 else raw[:77] + "…")
+    return facts
+
+
+def _scene_background(topic: str) -> str:
+    """Pick a stage backdrop theme from topic keywords."""
+    t = (topic or "").lower()
+    if any(k in t for k in ["space", "planet", "orbit", "star", "galaxy", "astronom"]):
+        return "space"
+    if any(k in t for k in ["plant", "forest", "crop", "farm", "ecosystem", "cycle", "animal", "nature"]):
+        return "nature"
+    if any(k in t for k in ["weather", "cloud", "ocean", "sea", "river", "climate"]):
+        return "sky"
+    return "lab"
+
+
+def _visualization_classifier(topic_title: str, concept_text: str, example_values: list[str] | None = None) -> VisualizationClassifier:
+    system_prompt = (
+        "You are a visualization-type classifier for an adaptive learning system. "
+        "Given a topic and its concept description, choose the best visualization renderer.\n"
+        "RENDERERS:\n"
+        "  - emoji-scene: algorithms, processes, sequences, step-by-step procedures, biological pathways, "
+        "digestion, engine cycles/strokes, photosynthesis, water cycles, historical sequences, recipes, manufacturing steps. "
+        "Actors move on a grid with emoji icons. Use whenever the topic has a clear A→B→C progression.\n"
+        "  - graph: quantitative relationships with axes, curves, or data trends. Best for: economics (supply/demand), physics (motion/forces), math (functions), chemistry (reaction rates), biology (population growth), any topic with 'X vs Y' or equilibrium.\n"
+        "  - diagram: structural or hierarchical concepts with labeled parts and connections. Best for: biology (cell structure), chemistry (molecular structure), history (causes/effects), systems (org charts, networks), geography (earthquakes), medicine (surgery), astronomy (planets), mechanics (engines), anything spatial or physical.\n"
+        "Output renderer and a 1-sentence reasoning.\n"
+        "IMPORTANT: For any topic that describes a sequential process (digestion, engine strokes/cycles, respiration, water cycle, "
+        "rock cycle, nitrogen cycle, immune response, etc.), ALWAYS choose 'emoji-scene'."
+    )
+    user_prompt = json.dumps({
+        "topic": topic_title,
+        "concept_description": concept_text[:400] if concept_text else topic_title,
+        "sequential_stages": example_values or [],
+        "output_type": "VisualizationClassifier",
+    })
+    def _fallback() -> VisualizationClassifier:
+        topic_lower = (topic_title or "").lower()
+        # Sequential/process topics → emoji-scene (most common for custom free-text questions)
+        if example_values and len(example_values) >= 3:
+            return VisualizationClassifier(renderer="emoji-scene", reasoning="Sequential multi-stage process detected")
+        if any(k in topic_lower for k in ["supply", "demand", "economics", "market", "price", "curve", "equilibrium"]):
+            return VisualizationClassifier(renderer="graph", reasoning="Quantitative curves/axes detected")
+        if any(k in topic_lower for k in ["cell", "molecule", "anatomy", "chemistry", "structure", "organelle"]):
+            return VisualizationClassifier(renderer="diagram", reasoning="Structural diagram detected")
+        return VisualizationClassifier(renderer="emoji-scene", reasoning="Default process/sequence")
+    try:
+        return call_structured_llm(
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            response_model=VisualizationClassifier,
+            fallback=_fallback,
+        )
+    except Exception:
+        return _fallback()
+
+
+def _scene_rules(step_range: str, renderer: str = "emoji-scene", is_sequential: bool = False) -> str:
+    base = (
+        "SCENE RULES — the required 'scene' field (this drives the animated visual the student watches):\n"
+        "  CRITICAL — This is an EDUCATIONAL animation. A student watching ONLY this animation must understand:\n"
+        "  1) what is being shown, 2) the key mechanism/insight, 3) the final concrete result.\n"
+        "  FRAMING (all three required):\n"
+        "    - scene.problem: ONE sentence stating the concrete problem with real values.\n"
+        "    - scene.goal: ONE sentence telling the student what to watch for.\n"
+        "    - scene.takeaway: ONE sentence with the concrete final result.\n"
+        "  - scene.background: a one-word theme: 'sky', 'lab', 'grid', 'nature', 'space', or 'default'.\n"
+    )
+
+    if renderer == "graph":
+        return base + (
+            "  RENDERER: 'graph' — axes + curves + points + annotations.\n"
+            "  You MUST populate 'graph_data' with this exact structure:\n"
+            "    graph_data = {\n"
+            "      x_axis: string, y_axis: string, x_range: [number, number], y_range: [number, number],\n"
+            "      curves: [{ id, type: 'supply'|'demand'|'line'|'curve', label, points: [[x,y],...], color: '#hex' }],\n"
+            "      equilibria: [{ id, x, y, label, color, visible_from_step, visible_to_step }],\n"
+            "      annotations: [{ text, x, y, step, color }]\n"
+            "    }\n"
+            "  RULES: Points must use the SAME coordinate space as x_range/y_range. "
+            "Use clear colors (#1cb0f6, #22c55e, #ef4444, #f59e0b). "
+            "Supply/demand: use type='supply' or 'demand'. Equilibrium points mark where curves cross. "
+            "Annotations appear at specific steps to explain shifts.\n"
+            "  scene.actors: 4-8 actors labeling axes, curves, and key points (not data points themselves).\n"
+            "  scene.steps: " + step_range + ". Each step has:\n"
+            "    * caption: ONE short sentence (max 110 chars) with real values.\n"
+            "    * narration: 1-2 sentences explaining WHY.\n"
+            "    * effects: use 'highlight', 'dim', 'pulse' on curve/axis actors. Do NOT use 'move' for curve data — curve movement is handled by graph_data visibility and annotations.\n"
+            "  FORBIDDEN: abstract labels like 'input 1', 'step 1', 'process'. Every label must name a REAL entity in this topic.\n"
+        )
+
+    if renderer == "diagram":
+        return base + (
+            "  RENDERER: 'diagram' — labeled structural components with connections.\n"
+            "  scene.actors: 4-8 actors representing REAL PARTS of this topic. "
+            "Use kind='node' for major components, kind='box' for sub-parts, kind='arrow' for connectors. "
+            "Labels must be the ACTUAL names from this domain (e.g. 'Mitochondria', 'French Revolution', 'HTTP').\n"
+            "  scene.steps: " + step_range + ". Each step has:\n"
+            "    * caption: ONE short sentence stating WHAT changes.\n"
+            "    * narration: 1-2 sentences explaining the mechanism.\n"
+            "    * effects: use 'appear', 'highlight', 'connect', 'pulse', 'dim'. "
+            "'connect' links two actors with a dashed line to show relationship.\n"
+            "  Step 0 = all parts appear labeled. Final step = the full mechanism is shown and highlighted.\n"
+            "  FORBIDDEN: generic labels like 'part A', 'component 1', 'stage 1'. Use real domain terminology.\n"
+        )
+
+    if renderer == "image-overlay":
+        return base + (
+            "  RENDERER: 'image-overlay' — base image with animated labels/annotations.\n"
+            "  scene.actors: 3-6 actors representing LABELS/ANNOTATIONS that will appear over an image. "
+            "Use kind='chip' or 'box' for labels, kind='arrow' for pointing indicators. "
+            "Labels must be SHORT (max 20 chars) and SPECIFIC to the concept.\n"
+            "  scene.steps: " + step_range + ". Each step has:\n"
+            "    * caption: ONE short sentence about what the annotation explains.\n"
+            "    * narration: 1-2 sentences connecting the label to the mechanism.\n"
+            "    * effects: use 'appear', 'move', 'highlight', 'pulse' to place labels on the image.\n"
+            "  Step 0 = initial labels appear. Final step = all key features are labeled and the takeaway is proven.\n"
+            "  NOTE: The base image is generated separately. Your actors are OVERLAYS only.\n"
+            "  FORBIDDEN: generic labels like 'area 1', 'part A'. Use real feature names.\n"
+        )
+
+    # emoji-scene with sequential-process spotlight pattern
+    if is_sequential:
+        return base + (
+            "  RENDERER: 'emoji-scene' — SEQUENTIAL PROCESS MODE.\n"
+            "  This topic has a clear stage-by-stage progression (e.g. A → B → C → D).\n"
+            "  STRUCTURE REQUIRED:\n"
+            "  scene.actors:\n"
+            "    1. One actor per stage (kind='box'). Label = the REAL stage name (e.g. 'Mouth', 'Stomach'). "
+            "Icon = a relevant emoji. Position them in a horizontal row: stage 1 at x≈12, stage 2 at x≈26, "
+            "stage 3 at x≈40, etc. (spacing = 14 units), all at y≈38.\n"
+            "    2. One 'pointer' actor (kind='arrow', label='here', icon='👇') starting at x of stage 1, y≈58. "
+            "It will move along the row as steps progress.\n"
+            "    3. One 'info' actor (kind='chip', label='', icon='') at x≈50, y≈72 for dynamic fact display.\n"
+            "  scene.steps:\n"
+            "    Step 0: ALL stage actors appear (effects: appear for each stage box + appear for pointer + appear for info).\n"
+            "      caption: '<Topic>: Food/material/signal enters at <stage-1-name>.'\n"
+            "      narration: Brief overview of the whole journey in 1-2 sentences.\n"
+            "    Steps 1..N (one step per stage): Spotlight EXACTLY ONE stage.\n"
+            "      effects:\n"
+            "        - pointer: move to that stage's x, y=58\n"
+            "        - that stage's box: highlight\n"
+            "        - previous stage's box: dim (if not step 1)\n"
+            "        - info chip: fill with a SHORT (≤40 chars) real fact about THIS stage\n"
+            "      caption: ONE sentence naming the stage and what it does (real biology/chemistry/physics fact).\n"
+            "      narration: 1-2 sentences explaining the mechanism at this stage — use real entities (enzymes, structures, chemicals).\n"
+            "    Final step: pointer pulses, last stage highlights, info chip shows the outcome/result.\n"
+            "  FORBIDDEN: generic captions like 'Stage 1: start' or 'step 1 builds on what came before'. "
+            "Every caption MUST name the REAL stage and its REAL function.\n"
+            "  FORBIDDEN: abstract labels like 'part A', 'process', 'result'. Use the actual domain names.\n"
+        )
+
+    # Default: emoji-scene (generic)
+    return base + (
+        "  RENDERER: 'emoji-scene' — actors on a percentage grid with emoji/icons.\n"
+        "  scene.actors: 3 to 8 actors. Each actor is a MEANINGFUL part of THIS concept — never a decorative placeholder.\n"
+        "    Actor fields: id (kebab-case), kind from " + _SCENE_KINDS + "; "
+        "a SHORT label (max 12 chars) naming its ROLE in this specific concept; an emoji 'icon' relevant to the concept; "
+        "x and y on a 0-100 percentage grid (y=10 top, y=90 bottom; keep x within 12-88, y within 15-85); "
+        "optional 'value' (number) for counters/meters. Data actors (boxes/chips) must carry the REAL example values as labels.\n"
+        "  - scene.steps: " + step_range + ". Each step has:\n"
+        "    * caption: ONE short sentence (max 110 chars) stating WHAT changes, with real values.\n"
+        "    * narration: 1-2 sentences explaining WHY this happens and what it proves.\n"
+        "    * effects: 1-4 effects that MUTATE the stage (move actors, fill labels, increment counters, highlight the actor the caption talks about).\n"
+        "    * Step 0 = the problem setup (actors with real input values appear). Final step = the outcome (the answer actor/result is highlighted, takeaway proven on stage).\n"
+        "  - Each effect: 'actor' (an actor id), 'action' from " + _SCENE_ACTIONS + "; for 'move' set to_x/to_y (0-100);\n"
+        "for 'split'/'merge'/'connect'/'emit' set 'target' to the partner actor id; 'label'/'value' update the actor's text/number.\n"
+        "  FORBIDDEN: captions or labels like 'step 1', 'input 1', 'input 2', 'process', 'something changes' — every caption must be about THIS topic's real content.\n"
+    )
+
+
+
+_CURATED_EXAMPLES = {
+    "two-sum-hashmap": "nums=[2,7,11,15], target=9",
+    "contains-duplicate": "nums=[1,2,3,1]",
+    "valid-anagram": "s='anagram', t='nagaram'",
+    "best-time-stock": "prices=[7,1,5,3,6,4]",
+    "max-subarray": "nums=[-2,1,-3,4,-1,2,1,-5,4]",
+    "valid-parentheses": "s='([]){}'",
+    "reverse-linked-list": "head=[1,2,3,4,5]",
+    "group-anagrams": "strs=['eat','tea','tan','ate','nat','bat']",
+    "product-except-self": "nums=[1,2,3,4]",
+    "top-k-frequent": "nums=[1,1,1,2,2,3], k=2",
+    "longest-consecutive": "nums=[100,4,200,1,3,2]",
+}
+
+
+def _two_sum_scene(naive: bool) -> SceneScript:
+    """Hand-crafted, genuinely explanatory scene for the flagship demo topic."""
+    values = ["2", "7", "11", "15"]
+    n = len(values)
+    x0 = 20.0
+    actors = [
+        SceneActor(id=f"box-{i}", kind="box", label=v, x=x0 + i * 17, y=32)
+        for i, v in enumerate(values)
+    ]
+    actors.append(SceneActor(id="target", kind="chip", label="target = 9", icon="🎯", x=84, y=18))
+    actors.append(SceneActor(id="scanner", kind="arrow", label="current", icon="👇", x=x0, y=50))
+    if naive:
+        actors.append(SceneActor(id="pairs", kind="counter", label="comparisons", icon="🔁", value=0, x=50, y=78))
+        steps = [
+            SceneStep(
+                id="s0", caption="Problem: find two numbers here that add up to 9.",
+                narration="The brute-force idea is simple: try every possible pair and check its sum. Correct — but how much work is it?",
+                effects=[SceneEffect(actor=f"box-{i}", action="appear") for i in range(n)]
+                + [SceneEffect(actor="target", action="appear"), SceneEffect(actor="scanner", action="appear")],
+            ),
+        ]
+        comparisons = 0
+        for i in range(n):
+            for j in range(i + 1, n):
+                comparisons += 1
+                steps.append(SceneStep(
+                    id=f"s-{i}-{j}",
+                    caption=f"Compare {values[i]} + {values[j]} = {int(values[i]) + int(values[j])}"
+                    + ("  ✅ found it!" if int(values[i]) + int(values[j]) == 9 else " — not 9."),
+                    narration=(
+                        f"This single check costs one comparison. With n numbers there are n·(n−1)/2 ≈ {n * (n - 1) // 2} "
+                        "such pairs — that's O(n²): the work explodes as the array grows."
+                        if int(values[i]) + int(values[j]) == 9
+                        else f"No match, so we try the next pair. Each 'no' still costs a full comparison — brute force pays for every guess."
+                    ),
+                    effects=[SceneEffect(actor="scanner", action="move", to_x=x0 + i * 17, to_y=50)]
+                    + [SceneEffect(actor=f"box-{i}", action="highlight"), SceneEffect(actor=f"box-{j}", action="highlight"),
+                       SceneEffect(actor="pairs", action="increment", value=comparisons)],
+                ))
+        steps.append(SceneStep(
+            id="s-end", caption=f"Done: {comparisons} comparisons to be sure. That's O(n²).",
+            narration="Imagine a million numbers — a trillion comparisons. We can do much better.",
+            effects=[SceneEffect(actor="pairs", action="pulse")],
+        ))
+        return SceneScript(
+            background="grid",
+            problem="Find two numbers in [2, 7, 11, 15] that add up to 9.",
+            goal="Watch the comparison counter — brute force pays for every pair it tries.",
+            takeaway="Brute force needed 6 comparisons for 4 numbers: correct, but O(n²) — it doesn't scale.",
+            actors=actors, steps=steps,
+        )
+
+    # Optimized: hash map one-pass
+    actors.append(SceneActor(id="map", kind="node", label="hash map", icon="🗂️", x=22, y=74))
+    actors.append(SceneActor(id="chip-0", kind="chip", label="", icon="", x=48, y=74))
+    actors.append(SceneActor(id="chip-1", kind="chip", label="", icon="", x=62, y=74))
+    actors.append(SceneActor(id="answer", kind="counter", label="pair found", icon="✅", value=0, x=84, y=74))
+    seen = ["2", "7", "11", "15"]
+    steps = [
+        SceneStep(
+            id="s0", caption="Problem: find two numbers that add up to 9 — in ONE pass.",
+            narration="The trick: as we visit each number, we ask 'have I already seen its partner (9 − current)?' The hash map answers in O(1) average time.",
+            effects=[SceneEffect(actor=f"box-{i}", action="appear") for i in range(n)]
+            + [SceneEffect(actor="target", action="appear"), SceneEffect(actor="scanner", action="appear"),
+               SceneEffect(actor="map", action="appear"), SceneEffect(actor="answer", action="appear")],
+        ),
+    ]
+    # trace: 2 (need 7, store 2) → 7 (need 2, FOUND)
+    steps.append(SceneStep(
+        id="s1", caption="Take 2: is its partner 9−2=7 in the map? Not yet.",
+        narration="The map only contains what we've already walked past. 7 isn't there — so we remember 2 and move on. No sorting, no comparing with every other element.",
+        effects=[SceneEffect(actor="scanner", action="move", to_x=x0, to_y=50), SceneEffect(actor="box-0", action="highlight"),
+                 SceneEffect(actor="map", action="pulse"), SceneEffect(actor="chip-0", action="appear", label="2")],
+    ))
+    steps.append(SceneStep(
+        id="s2", caption="Take 7: is its partner 9−7=2 in the map? YES!",
+        narration="Instead of re-scanning the array for 2, one direct map lookup proves 2 was seen before. That single lookup replaces an entire nested loop — this is the whole insight.",
+        effects=[SceneEffect(actor="scanner", action="move", to_x=x0 + 17, to_y=50), SceneEffect(actor="box-1", action="highlight"),
+                 SceneEffect(actor="chip-0", action="pulse"), SceneEffect(actor="answer", action="increment", value=1)],
+    ))
+    steps.append(SceneStep(
+        id="s3", caption="Answer: 2 + 7 = 9, found in 2 steps, not 6.",
+        narration="We never touched 11 or 15. One pass, one small map: O(n) average time, O(n) extra space — memory buys speed.",
+        effects=[SceneEffect(actor="answer", action="pulse"), SceneEffect(actor="chip-1", action="appear", label="done")],
+    ))
+    return SceneScript(
+        background="grid",
+        problem="Find two numbers in [2, 7, 11, 15] that add up to 9 — but in a single pass.",
+        goal="Watch the hash map: it remembers every number already seen, so each partner check is instant.",
+        takeaway="Answer: 2 + 7 = 9 at indices 0 and 1 — one pass, O(n) average time. The map never sorts anything; it just remembers.",
+        actors=actors, steps=steps,
+    )
+
+
+def _supply_demand_scene() -> SceneScript:
+    supply_points = [(10, 8), (25, 5), (40, 3), (55, 1.5)]
+    demand_points = [(10, 1), (25, 3), (40, 5), (55, 8)]
+    shifted_supply = [(20, 8), (35, 5), (50, 3), (65, 1.5)]
+
+    actors = [
+        SceneActor(id="x-axis", kind="arrow", label="Quantity", icon="", x=50, y=90),
+        SceneActor(id="y-axis", kind="arrow", label="Price ($)", icon="", x=12, y=50),
+        SceneActor(id="d-curve", kind="node", label="Demand", icon="📉", x=65, y=22),
+        SceneActor(id="s1-curve", kind="node", label="Supply", icon="📈", x=28, y=68),
+        SceneActor(id="s2-curve", kind="node", label="Supply (shifted)", icon="📈", x=28, y=68),
+        SceneActor(id="e1", kind="token", label="E1: $3, 40 units", icon="🔵", x=50, y=50),
+        SceneActor(id="e2", kind="token", label="E2: $5, 25 units", icon="🔴", x=38, y=42),
+        SceneActor(id="price-tag", kind="chip", label="", icon="", x=50, y=18),
+    ]
+
+    steps = [
+        SceneStep(
+            id="s0",
+            caption="Market starts at equilibrium E1: price $3, quantity 40.",
+            narration="Supply and demand curves cross where the market clears — every orange for sale finds a buyer at $3.",
+            effects=[
+                SceneEffect(actor="x-axis", action="appear"),
+                SceneEffect(actor="y-axis", action="appear"),
+                SceneEffect(actor="d-curve", action="appear"),
+                SceneEffect(actor="s1-curve", action="appear"),
+                SceneEffect(actor="e1", action="appear"),
+                SceneEffect(actor="price-tag", action="fill", label="$3"),
+            ],
+        ),
+        SceneStep(
+            id="s1",
+            caption="Heatwave destroys crops → orange supply drops at every price.",
+            narration="Sellers now have fewer oranges to sell. The whole supply curve shifts left (or up): S1 becomes S2.",
+            effects=[
+                SceneEffect(actor="s1-curve", action="shift_curve", to_x=38, to_y=68, label="Supply (shifted)"),
+                SceneEffect(actor="s2-curve", action="appear"),
+                SceneEffect(actor="s1-curve", action="disappear"),
+            ],
+        ),
+        SceneStep(
+            id="s2",
+            caption="New intersection E2: price rises to $5, quantity falls to 25.",
+            narration="Scarcity bids up the price. At $5, only 25 oranges trade — the market clears again, but fewer people buy.",
+            effects=[
+                SceneEffect(actor="e2", action="appear"),
+                SceneEffect(actor="e1", action="dim"),
+                SceneEffect(actor="s2-curve", action="highlight"),
+                SceneEffect(actor="d-curve", action="highlight"),
+                SceneEffect(actor="e2", action="highlight"),
+                SceneEffect(actor="price-tag", action="fill", label="$5"),
+            ],
+        ),
+        SceneStep(
+            id="s3",
+            caption="Takeaway: a supply drop raises price and lowers quantity sold.",
+            narration="This is the core supply-demand mechanism: curve shifts change both price and quantity, not just one.",
+            effects=[
+                SceneEffect(actor="e2", action="pulse"),
+                SceneEffect(actor="price-tag", action="pulse"),
+            ],
+        ),
+    ]
+
+    return SceneScript(
+        renderer="graph",
+        background="grid",
+        problem="A heatwave reduces orange supply. What happens to price and quantity?",
+        goal="Watch the supply curve shift left and track the new equilibrium.",
+        takeaway="Supply drop → higher equilibrium price, lower quantity sold.",
+        actors=actors,
+        steps=steps,
+        graph_data={
+            "x_axis": "Quantity of Oranges",
+            "y_axis": "Price ($)",
+            "x_range": [0, 80],
+            "y_range": [0, 10],
+            "curves": [
+                {
+                    "id": "d-curve",
+                    "type": "demand",
+                    "label": "Demand (D)",
+                    "points": demand_points,
+                    "color": "#1cb0f6",
+                },
+                {
+                    "id": "s1-curve",
+                    "type": "supply",
+                    "label": "Supply (S1)",
+                    "points": supply_points,
+                    "color": "#22c55e",
+                },
+                {
+                    "id": "s2-curve",
+                    "type": "supply",
+                    "label": "Supply (S2)",
+                    "points": shifted_supply,
+                    "color": "#f59e0b",
+                    "visible_from_step": 2,
+                },
+            ],
+            "equilibria": [
+                {"id": "e1", "x": 40, "y": 3, "label": "E1", "color": "#3b82f6", "visible_from_step": 1, "visible_to_step": 2},
+                {"id": "e2", "x": 25, "y": 5, "label": "E2", "color": "#ef4444", "visible_from_step": 3},
+            ],
+            "annotations": [
+                {"text": "Supply shifts left", "x": 45, "y": 72, "step": 2, "color": "#f59e0b"},
+                {"text": "Price ↑", "x": 8, "y": 52, "step": 3, "color": "#ef4444"},
+                {"text": "Quantity ↓", "x": 18, "y": 85, "step": 3, "color": "#ef4444"},
+            ],
+        },
+    )
+
+
+def _graph_fallback_scene(session: StudentSession) -> SceneScript:
+    concept_id = session.metadata.get("concept_id", "two-sum-hashmap")
+    node = get_concept_node(concept_id)
+    topic = session.active_topic or node.title
+    x_label = "Input / Cause"
+    y_label = "Output / Effect"
+    if "price" in topic.lower() or "demand" in topic.lower() or "supply" in topic.lower():
+        x_label = "Quantity"
+        y_label = "Price"
+    elif "force" in topic.lower() or "acceleration" in topic.lower():
+        x_label = "Force (N)"
+        y_label = "Acceleration (m/s²)"
+    elif "time" in topic.lower() or "distance" in topic.lower():
+        x_label = "Time"
+        y_label = "Distance"
+
+    return SceneScript(
+        renderer="graph",
+        background="grid",
+        problem=f"Visualize the core relationship in {topic}.",
+        goal="Watch the curve move from the starting state to the outcome.",
+        takeaway=f"The key insight of {topic} is the relationship between {x_label.lower()} and {y_label.lower()}.",
+        actors=[
+            SceneActor(id="x-axis", kind="arrow", label=x_label, icon="", x=50, y=90),
+            SceneActor(id="y-axis", kind="arrow", label=y_label, icon="", x=12, y=50),
+            SceneActor(id="line-before", kind="node", label="Before", icon="🔵", x=25, y=65),
+            SceneActor(id="line-after", kind="node", label="After", icon="🔴", x=65, y=35),
+        ],
+        steps=[
+            SceneStep(
+                id="s0",
+                caption=f"Starting state: {topic} at baseline.",
+                narration=f"We observe {topic} from its initial conditions.",
+                effects=[
+                    SceneEffect(actor="x-axis", action="appear"),
+                    SceneEffect(actor="y-axis", action="appear"),
+                    SceneEffect(actor="line-before", action="appear"),
+                ],
+            ),
+            SceneStep(
+                id="s1",
+                caption=f"A change occurs in {topic}.",
+                narration=f"The key mechanism shifts the relationship between {x_label.lower()} and {y_label.lower()}.",
+                effects=[
+                    SceneEffect(actor="line-after", action="appear"),
+                    SceneEffect(actor="line-before", action="dim"),
+                    SceneEffect(actor="line-after", action="highlight"),
+                ],
+            ),
+            SceneStep(
+                id="s2",
+                caption=f"Result: {topic} resolves at a new state.",
+                narration=f"The final outcome shows how {topic} adapts and stabilizes.",
+                effects=[
+                    SceneEffect(actor="line-after", action="pulse"),
+                ],
+            ),
+        ],
+        graph_data={
+            "x_axis": x_label,
+            "y_axis": y_label,
+            "x_range": [0, 100],
+            "y_range": [0, 100],
+            "curves": [
+                {
+                    "id": "line-before",
+                    "type": "line",
+                    "label": "Before",
+                    "points": [[10, 70], [30, 60], [50, 50], [70, 40]],
+                    "color": "#1cb0f6",
+                    "visible_from_step": 0,
+                    "visible_to_step": 1,
+                },
+                {
+                    "id": "line-after",
+                    "type": "line",
+                    "label": "After",
+                    "points": [[10, 40], [30, 35], [50, 30], [70, 20]],
+                    "color": "#ef4444",
+                    "visible_from_step": 1,
+                },
+            ],
+            "equilibria": [],
+            "annotations": [
+                {"text": "Change", "x": 45, "y": 55, "step": 1, "color": "#f59e0b"},
+            ],
+        },
+    )
+
+
+def _diagram_fallback_scene(session: StudentSession) -> SceneScript:
+    concept_id = session.metadata.get("concept_id", "two-sum-hashmap")
+    node = get_concept_node(concept_id)
+    topic = session.active_topic or node.title
+    words = topic.replace("&", "and").split()[:3]
+    safe = [w.strip(",.:;") for w in words if w.strip(",.:;")]
+    a = safe[0] if safe else "Part A"
+    b = safe[1] if len(safe) > 1 else "Part B"
+    c = safe[2] if len(safe) > 2 else "Result"
+
+    return SceneScript(
+        renderer="diagram",
+        background="lab",
+        problem=f"Understand the structure of {topic}.",
+        goal="Watch how the parts connect and produce the whole.",
+        takeaway=f"{topic} is a system of connected parts: {a}, {b}, and {c}.",
+        actors=[
+            SceneActor(id="a", kind="node", label=a, icon="🔵", x=25, y=40),
+            SceneActor(id="b", kind="node", label=b, icon="🟢", x=50, y=40),
+            SceneActor(id="c", kind="node", label=c, icon="🔴", x=75, y=40),
+        ],
+        steps=[
+            SceneStep(
+                id="s0",
+                caption=f"Parts of {topic}: {a}, {b}, {c}.",
+                narration="Every system is made of connected components.",
+                effects=[
+                    SceneEffect(actor="a", action="appear"),
+                    SceneEffect(actor="b", action="appear"),
+                    SceneEffect(actor="c", action="appear"),
+                ],
+            ),
+            SceneStep(
+                id="s1",
+                caption=f"{a} connects to {b}, which connects to {c}.",
+                narration=f"The mechanism of {topic} flows through these connections.",
+                effects=[
+                    SceneEffect(actor="a", action="connect", target="b"),
+                    SceneEffect(actor="b", action="connect", target="c"),
+                ],
+            ),
+            SceneStep(
+                id="s2",
+                caption=f"Together they form {topic}.",
+                narration=f"This is the complete structure: every part has a role.",
+                effects=[
+                    SceneEffect(actor="a", action="pulse"),
+                    SceneEffect(actor="b", action="pulse"),
+                    SceneEffect(actor="c", action="pulse"),
+                ],
+            ),
+        ],
+    )
+
+
+def _image_overlay_fallback_scene(session: StudentSession) -> SceneScript:
+    concept_id = session.metadata.get("concept_id", "two-sum-hashmap")
+    node = get_concept_node(concept_id)
+    topic = session.active_topic or node.title
+    return SceneScript(
+        renderer="image-overlay",
+        background="default",
+        problem=f"Explore {topic} with labeled annotations.",
+        goal="Watch each label appear and explain a key feature.",
+        takeaway=f"Key features of {topic} are shown and explained step by step.",
+        actors=[
+            SceneActor(id="lbl-1", kind="chip", label="Feature 1", icon="🏷️", x=30, y=30),
+            SceneActor(id="lbl-2", kind="chip", label="Feature 2", icon="🏷️", x=60, y=50),
+            SceneActor(id="lbl-3", kind="chip", label="Feature 3", icon="🏷️", x=40, y=70),
+        ],
+        steps=[
+            SceneStep(
+                id="s0",
+                caption=f"Overview of {topic}.",
+                narration="We'll annotate the key features one by one.",
+                effects=[
+                    SceneEffect(actor="lbl-1", action="appear"),
+                ],
+            ),
+            SceneStep(
+                id="s1",
+                caption="Second feature appears.",
+                narration="Each annotation highlights a specific mechanism.",
+                effects=[
+                    SceneEffect(actor="lbl-2", action="appear"),
+                    SceneEffect(actor="lbl-1", action="highlight"),
+                ],
+            ),
+            SceneStep(
+                id="s2",
+                caption="Third feature completes the picture.",
+                narration="All features together explain the whole concept.",
+                effects=[
+                    SceneEffect(actor="lbl-3", action="appear"),
+                    SceneEffect(actor="lbl-2", action="highlight"),
+                    SceneEffect(actor="lbl-3", action="highlight"),
+                ],
+            ),
+        ],
+    )
+
+
+def _fallback_scene(session: StudentSession, naive: bool = False, renderer: str = "emoji-scene") -> SceneScript:
+    """Deterministic scenes: hand-crafted for two-sum, renderer-aware fallbacks otherwise."""
+    concept_id = session.metadata.get("concept_id", "two-sum-hashmap")
+    topic = (session.active_topic or "").lower()
+    if concept_id == "two-sum-hashmap":
+        return _two_sum_scene(naive)
+
+    if renderer == "graph":
+        return _graph_fallback_scene(session)
+    if renderer == "diagram":
+        return _diagram_fallback_scene(session)
+    if renderer == "image-overlay":
+        return _diagram_fallback_scene(session)
+
+    if any(k in topic for k in ["supply", "demand", "economics", "market", "price"]):
+        return _supply_demand_scene()
+
+    brief = get_topic_brief(concept_id)
+
+    # ── Sequential process topic: progressive spotlight (pointer moves along the row) ──
+    if brief and brief.example_values and len(brief.example_values) >= 3:
+        tokens = [str(t)[:14] for t in brief.example_values]
+        n = len(tokens)
+        title = brief.title
+        icons = [_stage_icon(t, i) for i, t in enumerate(tokens)]
+        facts = _stage_facts(brief, tokens)
+
+        # Lay out stages in a horizontal row, spacing 14 units apart
+        spacing = min(26.0, max(12.0, 78.0 / max(n - 1, 1)))
+        x0 = max(10.0, (100.0 - (n - 1) * spacing) / 2)
+
+        # Stage boxes (icon is embedded in the label — the renderer shows box labels verbatim)
+        actors: list[SceneActor] = [
+            SceneActor(id=f"stage-{i}", kind="box", label=f"{icons[i]} {tokens[i]}", icon="",
+                       x=round(x0 + i * spacing, 1), y=38)
+            for i in range(n)
+        ]
+        # Flow arrows between consecutive stages so the A → B → C chain is visible
+        for i in range(n - 1):
+            actors.append(SceneActor(
+                id=f"flow-{i}", kind="arrow", label="", icon="➡️",
+                x=round(x0 + i * spacing + spacing / 2, 1), y=38,
+            ))
+        # Pointer arrow that moves under the active stage
+        actors.append(SceneActor(id="pointer", kind="arrow", label="here", icon="👇", x=round(x0, 1), y=58))
+        # Info chip for dynamic fact per stage
+        actors.append(SceneActor(id="info", kind="chip", label="", icon="💡", x=50, y=74))
+
+        problem = f"How does {title} work, stage by stage?"
+        goal = "Watch the pointer move to each stage — each one transforms the input into the next stage's starting material."
+        # Takeaway anchors on the final stage's real fact so it always reads as a conclusion.
+        takeaway = f"The chain ends at {tokens[-1]}: {facts[-1]}"
+
+        # Step 0: all actors appear
+        step0_effects: list[SceneEffect] = (
+            [SceneEffect(actor=f"stage-{i}", action="appear") for i in range(n)]
+            + [SceneEffect(actor=f"flow-{i}", action="appear") for i in range(n - 1)]
+            + [SceneEffect(actor="pointer", action="appear"), SceneEffect(actor="info", action="appear")]
+        )
+        steps: list[SceneStep] = [
+            SceneStep(
+                id="s0",
+                caption=f"{title}: follow each stage in sequence.",
+                narration=goal,
+                effects=step0_effects,
+            )
+        ]
+
+        # One step per stage: spotlight it
+        for i, token in enumerate(tokens):
+            effects: list[SceneEffect] = [
+                SceneEffect(actor="pointer", action="move", to_x=round(x0 + i * spacing, 1), to_y=58),
+                SceneEffect(actor=f"stage-{i}", action="highlight"),
+            ]
+            if i > 0:
+                effects.append(SceneEffect(actor=f"stage-{i - 1}", action="dim"))
+                effects.append(SceneEffect(actor=f"flow-{i - 1}", action="pulse"))
+            # Fill info with a short real fact about this stage
+            effects.append(SceneEffect(actor="info", action="fill", label=facts[i]))
+
+            steps.append(SceneStep(
+                id=f"s{i + 1}",
+                caption=f"{icons[i]} {token} — {facts[i]}"[:110],
+                narration=(
+                    "Each stage exists because the previous one produced something it needs — "
+                    "follow what gets handed along and the whole mechanism becomes obvious."
+                    if i > 0 else
+                    "Everything that follows depends on what happens at this first stage."
+                ),
+                effects=effects,
+            ))
+
+        # Final summary step
+        steps.append(SceneStep(
+            id=f"s{n + 1}",
+            caption=takeaway,
+            narration="That is the complete mechanism: a chain of cause and effect, not a list of isolated facts.",
+            effects=[
+                SceneEffect(actor="pointer", action="pulse"),
+                SceneEffect(actor=f"stage-{n - 1}", action="highlight"),
+                SceneEffect(actor="info", action="fill", label="Complete!"),
+            ],
+        ))
+
+        return SceneScript(
+            background=_scene_background(title),
+            problem=problem,
+            goal=goal,
+            takeaway=takeaway,
+            actors=actors,
+            steps=steps,
+        )
+
+    # ── Generic emoji-scene fallback for topics with no stage list ──
+    tokens = ["start", "process", "result"]
+    icons = ["▶️", "⚙️", "🏁"]
+    facts = _stage_facts(brief, tokens)
+    problem = f"See how {session.active_topic} unfolds, stage by stage."
+    goal = "Watch the sequence: each stage sets up the next one."
+    takeaway = "The final stage is the outcome of the whole chain."
+
+    n = len(tokens)
+    x0 = max(16.0, 50 - (n - 1) * 11)
+    actors = [
+        SceneActor(id=f"stage-{i}", kind="box", label=f"{icons[i]} {t}", icon="", x=x0 + i * 22, y=42)
+        for i, t in enumerate(tokens)
+    ]
+    for i in range(n - 1):
+        actors.append(SceneActor(id=f"flow-{i}", kind="arrow", label="", icon="➡️", x=x0 + i * 22 + 11, y=42))
+    actors.append(SceneActor(id="flow-pointer", kind="arrow", label="next", icon="👉", x=x0, y=66))
+    steps_generic: list[SceneStep] = [
+        SceneStep(
+            id="s0", caption=problem,
+            narration=goal,
+            effects=[SceneEffect(actor=f"stage-{i}", action="appear") for i in range(n)]
+            + [SceneEffect(actor=f"flow-{i}", action="appear") for i in range(n - 1)]
+            + [SceneEffect(actor="flow-pointer", action="appear")],
+        )
+    ]
+    for i in range(n):
+        steps_generic.append(SceneStep(
+            id=f"s{i + 1}",
+            caption=f"{icons[i]} {tokens[i]} — {facts[i]}"[:110] + ("." if not facts[i].endswith(".") else ""),
+            narration=(
+                "Each stage exists because the previous one produced something this stage needs."
+                if i > 0 else
+                "Everything that follows depends on this initial state."
+            ),
+            effects=[SceneEffect(actor="flow-pointer", action="move", to_x=x0 + i * 22, to_y=66),
+                     SceneEffect(actor=f"stage-{i}", action="pulse")],
+        ))
+    steps_generic.append(SceneStep(
+        id=f"s{n + 1}", caption=takeaway,
+        narration="That is the whole story: a chain of cause and effect, not a list of isolated facts.",
+        effects=[SceneEffect(actor=f"stage-{n - 1}", action="highlight")],
+    ))
+    return SceneScript(
+        background=_scene_background(session.active_topic),
+        problem=problem, goal=goal, takeaway=takeaway,
+        actors=actors, steps=steps_generic,
+    )
+
+
+
+def _visualization_fallback(session: StudentSession, renderer: str = "emoji-scene") -> VisualizationSpec:
+    if renderer == "image-overlay":
+        renderer = "emoji-scene"
     concept_id = session.metadata.get("concept_id", "two-sum-hashmap")
     node = get_concept_node(concept_id)
 
-    # Determine type
     vis_type = "comparison"
 
-    # Dynamic states based on concept prerequisites and title
     states = [
         VisualizationState(
             id="before",
-            labels=[f"Start: {node.title} input is loaded."],
+            labels=[f"Start: {node.title} initial state."],
             highlight=["input"]
         ),
         VisualizationState(
             id="step-1",
-            labels=[f"Stepping through optimized approach: scanning element/node."],
+            labels=[f"Key mechanism in action."],
             highlight=["optimized"]
         ),
         VisualizationState(
             id="conclusion",
-            labels=[f"Conclusion: Optimized approach resolved successfully."],
+            labels=[f"Result: {node.title} resolved."],
             highlight=["conclusion"]
         )
     ]
@@ -335,7 +1496,7 @@ def _visualization_fallback(session: StudentSession) -> VisualizationSpec:
         layout={"orientation": "left-right"},
         entities=[
             VisualizationEntity(id="input", kind="array", label="input values"),
-            VisualizationEntity(id="optimized", kind="node", label="optimized process"),
+            VisualizationEntity(id="optimized", kind="node", label="core process"),
             VisualizationEntity(id="conclusion", kind="node", label="result"),
         ],
         relations=[],
@@ -347,11 +1508,13 @@ def _visualization_fallback(session: StudentSession) -> VisualizationSpec:
         questions=[
             VisualizationQuestion(
                 id="q1",
-                prompt=f"What is the time complexity of the optimized approach?",
-                expectedObservations=["O(N)"]
+                prompt=f"What is the key mechanism in {node.title}?",
+                expectedObservations=["The core transformation or relationship"]
             )
         ],
-        expectedObservations=[]
+        expectedObservations=[],
+        renderer=renderer,
+        scene=_fallback_scene(session, naive=False, renderer=renderer),
     )
 
 
@@ -402,7 +1565,8 @@ def _visualization_bf_fallback(session: StudentSession) -> VisualizationSpec:
                 expectedObservations=["Nested scanning or extra work"]
             )
         ],
-        expectedObservations=[]
+        expectedObservations=[],
+        scene=_fallback_scene(session, naive=True),
     )
 
 
@@ -442,62 +1606,95 @@ def visualization_agent_real(session: StudentSession) -> VisualizationSpec:
         return _visualization_fallback(session)
 
     concept_id = session.metadata.get("concept_id", "two-sum-hashmap")
-
-    # Define standard examples for each concept
-    examples = {
-        "two-sum-hashmap": "nums=[2,7,11,15], target=9",
-        "contains-duplicate": "nums=[1,2,3,1]",
-        "valid-anagram": "s='anagram', t='nagaram'",
-        "best-time-stock": "prices=[7,1,5,3,6,4]",
-        "max-subarray": "nums=[-2,1,-3,4,-1,2,1,-5,4]",
-        "valid-parentheses": "s='([]){}'",
-        "reverse-linked-list": "head=[1,2,3,4,5]",
-        "group-anagrams": "strs=['eat','tea','tan','ate','nat','bat']",
-        "product-except-self": "nums=[1,2,3,4]",
-        "top-k-frequent": "nums=[1,1,1,2,2,3], k=2",
-        "longest-consecutive": "nums=[100,4,200,1,3,2]"
-    }
     brief = get_topic_brief(concept_id)
+
+    # Build example string grounded in blueprint for custom topics
+    example_values: list[str] = []
     if brief:
+        example_values = brief.example_values or []
         example_str = (
+            f"The topic '{brief.title}' has these sequential stages/entities: {' → '.join(example_values)}. "
+            f"Concrete worked example: {brief.example_walkthrough}"
+        ) if example_values else (
             f"input/state: {brief.input_display or brief.title}. "
             f"Concrete example to animate step by step: {brief.example_walkthrough}"
         )
-        type_rule = (
-            "  1. type must be one of 'process', 'timeline', 'flow', or 'comparison' — choose whichever best "
-            "matches how this topic's example unfolds (a repeating transformation -> 'process'; a historical or "
-            "sequential development -> 'timeline').\n"
-            "  2. entities: represent the example's stages, actors, or components as entities (kind: 'node' for "
-            "stages, 'array' for ordered values, 'metric' for quantities, 'flow' for processes).\n"
-        )
     else:
-        example_str = examples.get(concept_id, "nums=[2,7,11,15], target=9")
-        type_rule = (
-            "  1. type must be exactly 'comparison', 'stack', or 'linked-list' (use 'stack' ONLY if validating brackets/parentheses, use 'linked-list' ONLY if reversing a linked list).\n"
-            "  2. entities: include relevant visualization entities representing arrays, strings, stacks, hash-maps, links, nodes, edges, or metrics as appropriate.\n"
+        example_str = _CURATED_EXAMPLES.get(concept_id, "nums=[2,7,11,15], target=9")
+
+    # Classify topic into a renderer type, passing stage list for sequential detection
+    classifier = _visualization_classifier(concept.title, concept.canonical_definition, example_values=example_values)
+    renderer = classifier.renderer
+    if renderer == "image-overlay":
+        if (example_values and len(example_values) >= 3) or "digest" in concept.title.lower() or "engine" in concept.title.lower():
+            renderer = "emoji-scene"
+        else:
+            renderer = "diagram"
+    LOGGER.info("VisualizationClassifier: topic='%s' -> renderer='%s' (%s)", concept.title, renderer, classifier.reasoning)
+
+    # Detect sequential/process topics: 3+ named stages in example_values → use spotlight pattern
+    is_sequential = bool(brief and example_values and len(example_values) >= 3 and renderer == "emoji-scene")
+    step_range = f"{len(example_values) + 1} to {len(example_values) + 2}" if is_sequential else "4 to 7 steps"
+    scene_rules = _scene_rules(step_range, renderer=renderer, is_sequential=is_sequential)
+
+    # Build a stage-by-stage list hint for the LLM when sequential
+    stage_hint = ""
+    if is_sequential:
+        stage_hint = (
+            f"\n  STAGE LIST (animate EACH of these as its own step, in order): "
+            + ", ".join(f"'{s}'" for s in example_values)
+            + "\n  Each stage MUST have its own step in scene.steps with a caption naming that stage."
         )
 
     system_prompt = (
         "You are a visualization-design agent for an adaptive learning system. "
-        "You produce ONLY a VisualizationSpec JSON that drives a CSS-animated comparison UI.\n"
-        f"For the concept '{concept.title}', create a step-by-step visualization spec matching the problem dynamics.\n"
+        "You produce ONLY a VisualizationSpec JSON that drives a renderer-aware visualization UI.\n"
+        f"For the concept '{concept.title}', create a step-by-step visualization spec.\n"
         "Rules:\n"
-        + type_rule +
-        "  3. states: produce exactly 3 to 5 states (e.g. 'before', 'step-1', 'step-2', 'conclusion') explaining the process. "
-        "     Each state has a 'labels' list (1-3 strings) and a 'highlight' list referencing entity ids.\n"
-        "  4. transitions: link states sequentially with appropriate animations.\n"
-        "  5. questions: exactly 2 to 3 questions covering time complexity, space complexity, and common misconceptions.\n"
-        f"  6. Ground the example values in: {example_str}.\n"
-        "  7. Do not add extra fields beyond the schema."
+        f"  1. renderer must be exactly '{renderer}'. "
+        "This is already chosen by a classifier — do NOT override it.\n"
+        "  2. type must be one of: 'process', 'timeline', 'flow', 'comparison'. "
+        "For sequential/process topics, use 'flow' or 'process'.\n"
+        "  3. entities: represent the example's stages, actors, or components as entities "
+        "(kind: 'node' for stages, 'array' for ordered values, 'metric' for quantities, 'flow' for processes).\n"
+        "  4. states: produce exactly 3 to 5 states explaining the process. Each state has 'labels' and 'highlight'.\n"
+        "  5. transitions: link states sequentially with appropriate animations.\n"
+        "  6. questions: exactly 2 to 3 questions covering key intuitions and common misconceptions "
+        "for THIS specific topic — use real entity names, not generic phrasing.\n"
+        f"  7. Ground the example values in: {example_str}.{stage_hint}\n"
+        "  8. Do not add fields beyond the schema — but you MUST fill the 'scene' field, which IS part of the schema.\n"
+        + scene_rules
     )
 
     user_prompt = json.dumps({
-        "concept": concept.model_dump(),
-        "diagnostic_report": diagnosis.model_dump() if diagnosis else {},
+        "concept": {
+            "title": concept.title,
+            "canonical_definition": concept.canonical_definition,
+            "key_facts": concept.key_facts,
+            "teaching_emphasis": concept.teaching_emphasis,
+            "deep_mechanism": concept.deep_mechanism,
+            "narrative_intuition": concept.narrative_intuition,
+        },
+        "sequential_stages": example_values,
+        "student_misconceptions": (diagnosis.misconceptions if diagnosis else []),
+        "chosen_renderer": renderer,
+        "is_sequential_process": is_sequential,
         "output_type": "VisualizationSpec",
+        "example": example_str,
         "instruction": (
-            f"Produce a VisualizationSpec JSON for the comparison of brute-force vs optimized methods for {concept.title}. "
-            "Tailor state labels to the student's specific misconceptions listed in diagnostic_report."
+            f"Produce a VisualizationSpec JSON with renderer='{renderer}' and a full 'scene' script. "
+            f"Animate the core mechanism of '{concept.title}' step by step. Use the example: {example_str}. "
+            + (
+                f"This is a SEQUENTIAL PROCESS. Create ONE scene step per stage: "
+                + ", ".join(example_values)
+                + ". Each step must name the REAL stage and explain what it does with domain-accurate facts. "
+                if is_sequential else ""
+            )
+            + "The scene must: (1) Open with a caption stating what process/topic we're showing. "
+            "(2) Show each key step/stage with meaningful captions using REAL entity names. "
+            "(3) Close with the final outcome or takeaway. "
+            "Correct the student's misconceptions in step narrations where relevant. "
+            f"Because renderer='{renderer}', follow its schema EXACTLY as described in the system prompt."
         ),
     })
 
@@ -506,15 +1703,24 @@ def visualization_agent_real(session: StudentSession) -> VisualizationSpec:
             system_prompt=system_prompt,
             user_prompt=user_prompt,
             response_model=VisualizationSpec,
-            fallback=lambda: _visualization_fallback(session),
+            fallback=lambda: _visualization_fallback(session, renderer=renderer),
         )
         if concept_id == "two-sum-hashmap":
             spec = _guard_visualization_spec(spec, diagnosis)
-        log_agent_call(session, "VisualizationAgent", {"llm_spec_id": spec.id, "states": len(spec.states)})
+
+
+        # Force the classifier's renderer into the spec so frontend dispatches correctly
+        spec.renderer = renderer
+        if spec.scene is None or not spec.scene.steps:
+            spec.scene = _fallback_scene(session, naive=False, renderer=renderer)
+        elif spec.scene and spec.scene.renderer != renderer:
+            spec.scene.renderer = renderer
+
+        log_agent_call(session, "VisualizationAgent", {"llm_spec_id": spec.id, "renderer": renderer, "states": len(spec.states)})
         return spec
     except Exception as exc:
         LOGGER.warning("VisualizationAgent LLM call failed: %s; using fallback", exc)
-        fallback = _visualization_fallback(session)
+        fallback = _visualization_fallback(session, renderer=renderer)
         log_agent_call(session, "VisualizationAgent", {"fallback_used": True})
         return fallback
 
@@ -563,15 +1769,24 @@ def visualization_agent_bf_real(session: StudentSession) -> VisualizationSpec:
         "  4. transitions: link states sequentially.\n"
         "  5. questions: exactly 2 questions asking about the naive time and space complexity.\n"
         f"  6. Ground the example values in: {example_str}.\n"
-        "  7. Do not add extra fields beyond the schema."
+        "  7. Do not add fields beyond the schema — but you MUST fill the 'scene' field, which IS part of the schema. "
+        "The scene must make the naive approach look appropriately laborious (repeated scanning, piling-up counters).\n"
+        + _scene_rules("4 to 6 steps")
     )
 
     user_prompt = json.dumps({
-        "concept": concept.model_dump(),
-        "diagnostic_report": diagnosis.model_dump() if diagnosis else {},
+        "concept": {
+            "title": concept.title,
+            "canonical_definition": concept.canonical_definition,
+            "key_facts": concept.key_facts,
+            "method_summaries": [f"{m.name} — {m.complexity.get('time', 'n/a')} time" for m in (concept.methods or [])],
+        },
+        "student_misconceptions": (diagnosis.misconceptions if diagnosis else []),
         "output_type": "VisualizationSpec",
+        "example": example_str,
         "instruction": (
-            f"Produce a VisualizationSpec JSON for the brute-force or naive explanation of {concept.title}."
+            f"Produce a VisualizationSpec JSON (including its full 'scene' script) for the brute-force or "
+            f"naive explanation of {concept.title}."
         ),
     })
 
@@ -582,6 +1797,8 @@ def visualization_agent_bf_real(session: StudentSession) -> VisualizationSpec:
             response_model=VisualizationSpec,
             fallback=lambda: _visualization_bf_fallback(session),
         )
+        if spec.scene is None or not spec.scene.steps:
+            spec.scene = _fallback_scene(session, naive=True)
         log_agent_call(session, "VisualizationAgentBF", {"llm_spec_id": spec.id, "states": len(spec.states)})
         return spec
     except Exception as exc:
@@ -628,31 +1845,67 @@ def visualization_agent_stub(session: StudentSession) -> VisualizationSpec:
     )
 
 
-def practice_agent_stub(session: StudentSession) -> ExerciseSet:
+def practice_agent_real(session: StudentSession) -> ExerciseSet:
+    """LLM-powered practice agent that generates topic-specific challenge questions."""
     log_agent_call(session, "PracticeAgent", {"topic": session.active_topic})
     brief = get_topic_brief(session.metadata.get("concept_id", ""))
-    prompt = (
-        brief.practice_challenge
-        if brief and brief.practice_challenge
-        else "For nums = [2, 7, 11, 15], target = 9, what is the complement of 2 and why is it useful?"
+    concept = session.concept_history[0] if session.concept_history else None
+    topic = session.active_topic
+
+    def _fallback() -> ExerciseSet:
+        prompt = (
+            brief.practice_challenge
+            if brief and brief.practice_challenge
+            else f"Explain in your own words how {topic} works and why it matters."
+        )
+        hints = [
+            "Think about the key facts shown in the lesson",
+            "Walk through the concrete example step by step"
+        ]
+        return ExerciseSet(
+            exercises=[
+                ExerciseTask(
+                    id="task-1",
+                    type="explanation",
+                    prompt=prompt,
+                    expected_reasoning="; ".join(brief.key_facts) if brief and brief.key_facts else f"Explanation grounded in the core mechanism of {topic}.",
+                    hints=hints
+                )
+            ],
+            summary=f"Practice focuses on explaining the core mechanism of {topic} in your own words."
+        )
+
+    system_prompt = (
+        "You are a practice-question generator for an adaptive learning platform. "
+        "Generate ONE open-ended practice question that asks the student to explain the core mechanism "
+        "of the topic in their own words, using the concrete example from the lesson. "
+        "The question must be answerable by typing a short paragraph (3-6 sentences). "
+        "Do NOT ask for code or mathematical derivations — ask for explanation and reasoning. "
+        "Return an ExerciseSet JSON with one ExerciseTask (id='task-1', type='explanation'). "
+        "The 'expected_reasoning' field should list the key facts the answer must contain. "
+        "Include 2-3 progressively more specific hints in the 'hints' array."
     )
-    hints = (
-        ["Think about the key facts from the explanation", "Walk through the example step by step"]
-        if brief
-        else ["Think about target - current_value", "You are looking for the other number, not a sorted order"]
-    )
-    return ExerciseSet(
-        exercises=[
-            ExerciseTask(
-                id="task-1",
-                type="prediction",
-                prompt=prompt,
-                expected_reasoning="; ".join(brief.key_facts) if brief and brief.key_facts else "Explanation grounded in the concept's key facts.",
-                hints=hints
-            )
-        ],
-        summary="Practice is focused on explaining the core mechanism in the student's own words."
-    )
+    user_prompt = json.dumps({
+        "topic": topic,
+        "key_facts": (concept.key_facts if concept else (brief.key_facts if brief else [])),
+        "example": (brief.example_walkthrough if brief else ""),
+        "output_type": "ExerciseSet",
+    })
+    try:
+        result = call_structured_llm(
+            system_prompt=system_prompt,
+            user_prompt=user_prompt,
+            response_model=ExerciseSet,
+            fallback=_fallback,
+        )
+        return result
+    except Exception:
+        return _fallback()
+
+
+def practice_agent_stub(session: StudentSession) -> ExerciseSet:
+    """Alias kept for backward compatibility — now calls the real agent."""
+    return practice_agent_real(session)
 
 
 def _evaluation_fallback(session: StudentSession) -> EvaluationResult:
